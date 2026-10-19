@@ -119,14 +119,19 @@ dd { margin: 0; overflow-wrap: anywhere; }
 
 #fill { width: 100%; }
 
-#fill-report {
+h3 { font-size: 13px; margin: 18px 0 8px; }
+
+.buttons { display: flex; gap: 8px; }
+.buttons button { flex: 1; }
+
+#fill-report, #int-report {
   list-style: none;
   padding: 0;
   margin: 10px 0 0;
 }
 
-#fill-report .filled { color: var(--ok); }
-#fill-report .empty, #fill-report .not-found { color: var(--warn); }
-#fill-report .error { color: var(--bad); }
+.filled { color: var(--ok); }
+.empty, .not-found, .no-match, .choose { color: var(--warn); }
+li.error { color: var(--bad); }
 
 header button.link { margin-top: 0; }

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "CRM → IRIS",
-  "version": "0.3.0",
-  "description": "Find a student in the CCP CRM and fill the IRIS (SICAP) New Individual form.",
+  "version": "0.4.0",
+  "description": "Find a student in the CCP CRM and fill IRIS (SICAP) New Individual and Individual Intervention forms.",
   "action": {
     "default_title": "CRM → IRIS"
   },

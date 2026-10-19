@@ -83,6 +83,36 @@ export function toIrisFields(student, firstRegisteredAt) {
   ];
 }
 
+/** The Action both intervention buttons pick, for the year in question. */
+export const NEW_ARRIVALS_ACTION = 'SUPPORTS TO NEW ARRIVALS';
+
+/**
+ * Fields for the IRIS "New Individual Intervention" form.
+ * 'registration': the one-to-one registration meeting, dated on the student's
+ * first course registration. 'course': only the start of a course intervention.
+ */
+export function interventionFields(kind, firstRegisteredAt, today = new Date()) {
+  const date = localDateParts(firstRegisteredAt);
+  const action = {
+    key: 'action', labels: ['Action'], names: [], type: 'lookup',
+    value: { name: NEW_ARRIVALS_ACTION, match: 'contains', preferYear: kind === 'registration' && date ? date[0] : today.getFullYear() },
+  };
+  const staff = { key: 'staff', labels: ['LDC Staff Member'], names: [], type: 'lookup-me', value: true, keepExisting: true };
+  const type = (text) => ({ key: 'intervention_type', labels: ['Intervention Type'], names: [], type: 'option', value: text });
+
+  if (kind === 'course') return [action, staff, type('Labour market related course')];
+  return [
+    action,
+    staff,
+    type('One-to-one meeting'),
+    { key: 'intervention_date', labels: ['Date of Intervention'], names: [], type: 'date', value: date },
+    { key: 'support_type', labels: ['Support Type'], names: [], type: 'lookup', value: { name: 'Career guidance', match: 'exact' } },
+    { key: 'case_notes', labels: ['Case Notes'], names: [], type: 'text', value: 'Reg' },
+    { key: 'personal_plan', labels: ['Personal Plan Agreed'], names: [], type: 'boolean', value: true },
+    { key: 'status_change', labels: ['Has there been a change of status or progression outcome for the individual?'], names: [], type: 'option', value: 'No' },
+  ];
+}
+
 /** What to type into the IRIS "Auto Address" box: the Eircode, else the address. */
 export function autoAddressQuery(student) {
   return (student.eircode || '').trim().toUpperCase() || (student.address || '').trim();
@@ -101,32 +131,66 @@ export async function fillIrisForm(fields) {
   }
   const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const controls = page.ui.controls.get() || [];
+  const withAttr = controls.filter((c) =>
+    typeof c.getAttribute === 'function' && typeof c.getLabel === 'function' && c.getAttribute());
   const controlByLabel = (labels) => {
     const wanted = labels.map(norm);
-    for (const c of controls) {
-      if (typeof c.getAttribute !== 'function' || typeof c.getLabel !== 'function') continue;
-      if (c.getAttribute() && wanted.includes(norm(c.getLabel()))) return c;
-    }
-    return null;
+    const exact = withAttr.find((c) => wanted.includes(norm(c.getLabel())));
+    if (exact) return exact;
+    // Long labels get reworded or cut: let them match by their start.
+    return withAttr.find((c) => {
+      const label = norm(c.getLabel());
+      return wanted.some((w) => w.length >= 20 && label.length >= 20 && (w.startsWith(label) || label.startsWith(w)));
+    }) || null;
   };
+
+  const lookupMeta = async (control) => {
+    const entity = (control && control.getEntityTypes && control.getEntityTypes()[0]) || null;
+    if (!entity || !Xrm.WebApi || !Xrm.Utility) throw new Error('lookup not readable');
+    const meta = await Xrm.Utility.getEntityMetadata(entity, []);
+    return { entity, id: meta.PrimaryIdAttribute, name: meta.PrimaryNameAttribute };
+  };
+  // Active records first; some tables have no statecode, so retry without it.
+  const fetchRows = async (m, filter) => {
+    const select = `?$select=${m.id},${m.name}&$top=50`;
+    const both = (f) => [f, 'statecode eq 0'].filter(Boolean).join(' and ');
+    try {
+      return (await Xrm.WebApi.retrieveMultipleRecords(m.entity, `${select}&$filter=${both(filter)}`)).entities;
+    } catch (e) {
+      return (await Xrm.WebApi.retrieveMultipleRecords(m.entity, filter ? `${select}&$filter=${filter}` : select)).entities;
+    }
+  };
+  const odata = (text) => `'${String(text).replace(/'/g, "''")}'`;
+  const asLookup = (m, row) => [{ id: row[m.id], name: row[m.name], entityType: m.entity }];
 
   // A lookup with a single sensible choice (CAB/Lot): take the only active
   // record, or the one named `preferred` when there are several.
   const onlyLookupValue = async (control, preferred) => {
-    const entity = (control.getEntityTypes && control.getEntityTypes()[0]) || null;
-    if (!entity || !Xrm.WebApi || !Xrm.Utility) throw new Error('lookup not readable');
-    const meta = await Xrm.Utility.getEntityMetadata(entity, []);
-    const id = meta.PrimaryIdAttribute;
-    const name = meta.PrimaryNameAttribute;
-    const select = `?$select=${id},${name}&$top=50`;
-    let rows;
-    try {
-      rows = (await Xrm.WebApi.retrieveMultipleRecords(entity, `${select}&$filter=statecode eq 0`)).entities;
-    } catch (e) {
-      rows = (await Xrm.WebApi.retrieveMultipleRecords(entity, select)).entities;
-    }
-    const pick = rows.length === 1 ? rows[0] : rows.find((r) => norm(r[name]) === norm(preferred));
-    return pick ? [{ id: pick[id], name: pick[name], entityType: entity }] : null;
+    const m = await lookupMeta(control);
+    const rows = await fetchRows(m, '');
+    const pick = rows.length === 1 ? rows[0] : rows.find((r) => norm(r[m.name]) === norm(preferred));
+    return pick ? asLookup(m, pick) : null;
+  };
+
+  // A lookup by record name. With several matches, the one carrying
+  // "(preferYear)" wins, else the newest-looking name.
+  const namedLookupValue = async (control, { name, match, preferYear }) => {
+    const m = await lookupMeta(control);
+    const filter = match === 'contains' ? `contains(${m.name},${odata(name)})` : `${m.name} eq ${odata(name)}`;
+    const rows = await fetchRows(m, filter);
+    if (!rows.length) return null;
+    const byYear = preferYear && rows.find((r) => String(r[m.name]).includes(`(${preferYear})`));
+    const newest = rows.slice().sort((a, b) => String(b[m.name]).localeCompare(String(a[m.name])))[0];
+    return asLookup(m, byYear || newest);
+  };
+
+  const userName = () => {
+    const ctx = Xrm.Utility && Xrm.Utility.getGlobalContext && Xrm.Utility.getGlobalContext();
+    return ctx && ctx.userSettings ? ctx.userSettings.userName : '';
+  };
+  const hasValue = (attr) => {
+    const v = attr.getValue();
+    return v !== null && v !== undefined && v !== '' && !(Array.isArray(v) && !v.length);
   };
 
   const results = [];
@@ -146,20 +210,34 @@ export async function fillIrisForm(fields) {
       results.push({ key: field.key, status: 'not-found' });
       continue;
     }
+    if ((field.keepExisting || field.type === 'only-lookup') && hasValue(attr)) {
+      results.push({ key: field.key, status: 'kept' });
+      continue;
+    }
     try {
       let value;
       if (field.type === 'date') {
         value = new Date(field.value[0], field.value[1] - 1, field.value[2]);
       } else if (field.type === 'only-lookup') {
-        if (attr.getValue()) {
-          results.push({ key: field.key, status: 'kept' });
-          continue;
-        }
-        value = control ? await onlyLookupValue(control, field.value) : null;
+        value = await onlyLookupValue(control, field.value);
         if (!value) {
           results.push({ key: field.key, status: 'choose' });
           continue;
         }
+      } else if (field.type === 'lookup' || field.type === 'lookup-me') {
+        const wanted = field.type === 'lookup-me' ? { name: userName(), match: 'exact' } : field.value;
+        value = wanted.name ? await namedLookupValue(control, wanted) : null;
+        if (!value) {
+          results.push({ key: field.key, status: 'no-match', message: wanted.name });
+          continue;
+        }
+      } else if (field.type === 'option') {
+        const option = (attr.getOptions() || []).find((o) => norm(o.text) === norm(field.value));
+        if (!option) {
+          results.push({ key: field.key, status: 'no-match', message: field.value });
+          continue;
+        }
+        value = option.value;
       } else {
         value = field.value;
       }

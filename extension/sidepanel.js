@@ -3,6 +3,7 @@ import {
   buildSearchFilter,
   fillIrisForm,
   formatDate,
+  interventionFields,
   localDateParts,
   toIrisFields,
   toIrishLocalPhone,
@@ -20,6 +21,14 @@ const FIELD_NAMES = {
   dob: 'Date of Birth',
   registration: 'Date of Registration Meeting',
   cab: 'CAB/Lot',
+  action: 'Action',
+  staff: 'LDC Staff Member',
+  intervention_type: 'Intervention Type',
+  intervention_date: 'Date of Intervention',
+  support_type: 'Support Type',
+  case_notes: 'Case Notes',
+  personal_plan: 'Personal Plan Agreed',
+  status_change: 'Change of status or progression',
 };
 
 let client = null;
@@ -155,6 +164,7 @@ function renderResults() {
 function select(id) {
   selectedId = id;
   $('fill-report').replaceChildren();
+  $('int-report').replaceChildren();
   renderResults();
   loadFirstRegistration(id);
 }
@@ -202,11 +212,13 @@ function registeredText(id) {
   return parts ? parts.reverse().map((n) => String(n).padStart(2, '0')).join('/') : 'no course registrations';
 }
 
-$('fill').addEventListener('click', async () => {
+// Fills the open IRIS form with `buildFields(student, firstRegisteredAt)`.
+// `after` may add to the result, e.g. the Auto Address step.
+async function fillFromPanel(report, buildFields, after) {
   const s = students.find((x) => x.id === selectedId);
   if (!s) return;
-  const button = $('fill');
-  button.disabled = true;
+  const buttons = document.querySelectorAll('#selected button');
+  buttons.forEach((b) => { b.disabled = true; });
   try {
     if (!firstRegistered.has(s.id) || firstRegistered.get(s.id) === undefined) await loadFirstRegistration(s.id);
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -214,16 +226,27 @@ $('fill').addEventListener('click', async () => {
       target: { tabId: tab.id },
       world: 'MAIN',
       func: fillIrisForm,
-      args: [toIrisFields(s, firstRegistered.get(s.id))],
+      args: [buildFields(s, firstRegistered.get(s.id))],
     });
-    if (result && result.ok) result.address = await typeAddress(tab.id, autoAddressQuery(s));
-    renderReport(result);
+    if (result && result.ok && after) await after(result, tab, s);
+    renderReport(report, result);
   } catch (e) {
-    renderReport({ ok: false, error: String(e && e.message || e) });
+    renderReport(report, { ok: false, error: String(e && e.message || e) });
   } finally {
-    button.disabled = false;
+    buttons.forEach((b) => { b.disabled = false; });
   }
-});
+}
+
+$('fill').addEventListener('click', () =>
+  fillFromPanel($('fill-report'), toIrisFields, async (result, tab, s) => {
+    result.address = await typeAddress(tab.id, autoAddressQuery(s));
+  }));
+
+$('int-registration').addEventListener('click', () =>
+  fillFromPanel($('int-report'), (_s, at) => interventionFields('registration', at)));
+
+$('int-course').addEventListener('click', () =>
+  fillFromPanel($('int-report'), (_s, at) => interventionFields('course', at)));
 
 // The Auto Address box sits in its own frame, so look in all of them.
 async function typeAddress(tabId, query) {
@@ -242,7 +265,7 @@ async function typeAddress(tabId, query) {
   }
 }
 
-function renderReport(result) {
+function renderReport(list, result) {
   const item = (text, cls) => {
     const li = document.createElement('li');
     li.textContent = text;
@@ -251,9 +274,9 @@ function renderReport(result) {
   };
   if (!result || !result.ok) {
     const message = result && result.error === 'no-form'
-      ? 'Open the New Individual form in IRIS first, then press Fill.'
+      ? 'Open the IRIS form first, then press the button again.'
       : `Could not fill: ${(result && result.error) || 'unknown error'}. Is the IRIS tab active?`;
-    $('fill-report').replaceChildren(item(message, 'error'));
+    list.replaceChildren(item(message, 'error'));
     return;
   }
   const text = {
@@ -263,6 +286,7 @@ function renderReport(result) {
     error: 'IRIS refused the value',
     kept: 'already chosen, left as is',
     choose: 'more than one option, choose by hand',
+    'no-match': 'no such option in IRIS, choose by hand',
   };
   const lines = result.results.map((r) =>
     item(`${FIELD_NAMES[r.key]}: ${text[r.status]}${r.message ? ` (${r.message})` : ''}`, r.status),
@@ -274,7 +298,7 @@ function renderReport(result) {
     if (result.frames && result.frames.length) lines.push(item(`Frames on the page: ${result.frames.join(', ')}`, 'hint'));
   }
   lines.push(item('Check the form, finish the rest and save in IRIS.', ''));
-  $('fill-report').replaceChildren(...lines);
+  list.replaceChildren(...lines);
 }
 
 start();

@@ -5,6 +5,7 @@ import {
   buildSearchFilter,
   fillIrisForm,
   formatDate,
+  interventionFields,
   localDateParts,
   parseIsoDate,
   toIrisFields,
@@ -187,5 +188,122 @@ test('Auto Address: types into the box, never into the County / Dublin Postcode 
   });
   await withPage({ inputs: [county] }, async () => {
     assert.equal(await typeAutoAddress('P51X768', 0), 'not-found');
+  });
+});
+
+test('intervention fields: registration and course', () => {
+  const reg = Object.fromEntries(interventionFields('registration', '2025-03-12T09:00:00').map((f) => [f.key, f.value]));
+  assert.deepEqual(reg, {
+    action: { name: 'SUPPORTS TO NEW ARRIVALS', match: 'contains', preferYear: 2025 },
+    staff: true,
+    intervention_type: 'One-to-one meeting',
+    intervention_date: [2025, 3, 12],
+    support_type: { name: 'Career guidance', match: 'exact' },
+    case_notes: 'Reg',
+    personal_plan: true,
+    status_change: 'No',
+  });
+  const course = interventionFields('course', '2025-03-12T09:00:00', new Date(2026, 9, 19));
+  assert.deepEqual(course.map((f) => f.key), ['action', 'staff', 'intervention_type']);
+  assert.equal(course[0].value.preferYear, 2026);
+  assert.equal(course[2].value, 'Labour market related course');
+});
+
+// An intervention form: lookups answer OData filters from `tables`.
+function fakeInterventionForm(tables, { staffSet = false } = {}) {
+  const attrs = {};
+  const make = (label, entity, options) => {
+    const attr = {
+      value: null,
+      getValue() { return this.value; },
+      setValue(v) { this.value = v; },
+      fireOnChange() {},
+      getOptions: () => options || [],
+    };
+    attrs[label] = attr;
+    return { getLabel: () => label, getAttribute: () => attr, getEntityTypes: () => (entity ? [entity] : []) };
+  };
+  const controls = [
+    make('Action', 'sic_action'),
+    make('LDC Staff Member', 'sic_staff'),
+    make('Date of Intervention'),
+    make('Case Notes'),
+    make('Personal Plan Agreed'),
+    make('Intervention Type', null, [{ value: 1, text: 'One-to-one meeting' }, { value: 2, text: 'Labour market related course' }]),
+    make('Support Type', 'sic_support'),
+    make('Has there been a change of status or progression outcome for the individual?', null, [{ value: 10, text: 'Yes' }, { value: 11, text: 'No' }]),
+  ];
+  if (staffSet) attrs['LDC Staff Member'].value = [{ id: 'other', name: 'Someone', entityType: 'sic_staff' }];
+  const queries = [];
+  const Xrm = {
+    Page: { ui: { controls: { get: () => controls } }, getAttribute: () => null },
+    Utility: {
+      getEntityMetadata: async () => ({ PrimaryIdAttribute: 'id', PrimaryNameAttribute: 'name' }),
+      getGlobalContext: () => ({ userSettings: { userName: 'Ihor Vasyliev' } }),
+    },
+    WebApi: {
+      retrieveMultipleRecords: async (entity, options) => {
+        queries.push(`${entity}${options}`);
+        const filter = decodeURIComponent(options);
+        const contains = /contains\(name,'(.*?)'\)/.exec(filter);
+        const eq = /name eq '(.*?)'/.exec(filter);
+        return {
+          entities: (tables[entity] || []).filter((r) =>
+            contains ? r.name.includes(contains[1]) : eq ? r.name === eq[1] : true),
+        };
+      },
+    },
+  };
+  return { attrs, queries, Xrm };
+}
+
+const TABLES = {
+  sic_action: [
+    { id: 'a25', name: '(2025) 09 SUPPORTS TO NEW ARRIVALS' },
+    { id: 'a26', name: '(2026) 09 SUPPORTS TO NEW ARRIVALS' },
+    { id: 'x', name: '(2026) 01 SOMETHING ELSE' },
+  ],
+  sic_staff: [{ id: 'me', name: 'Ihor Vasyliev' }, { id: 'other', name: 'Someone' }],
+  sic_support: [{ id: 'cg', name: 'Career guidance' }, { id: 'cg2', name: 'Career guidance extra' }],
+};
+
+test('fill: registration intervention', async () => {
+  const { attrs, Xrm } = fakeInterventionForm(TABLES);
+  await withPage({ Xrm }, async () => {
+    const result = await fillIrisForm(interventionFields('registration', '2026-03-12T09:00:00'));
+    assert.ok(result.results.every((r) => r.status === 'filled'), JSON.stringify(result.results));
+    assert.equal(attrs.Action.value[0].id, 'a26');
+    assert.deepEqual(attrs['LDC Staff Member'].value, [{ id: 'me', name: 'Ihor Vasyliev', entityType: 'sic_staff' }]);
+    assert.equal(attrs['Intervention Type'].value, 1);
+    const d = attrs['Date of Intervention'].value;
+    assert.deepEqual([d.getFullYear(), d.getMonth(), d.getDate()], [2026, 2, 12]);
+    assert.equal(attrs['Support Type'].value[0].id, 'cg');
+    assert.equal(attrs['Case Notes'].value, 'Reg');
+    assert.equal(attrs['Personal Plan Agreed'].value, true);
+    assert.equal(attrs['Has there been a change of status or progression outcome for the individual?'].value, 11);
+  });
+});
+
+test('fill: course intervention keeps a chosen staff member and picks the year', async () => {
+  const { attrs, Xrm } = fakeInterventionForm(TABLES, { staffSet: true });
+  await withPage({ Xrm }, async () => {
+    const result = await fillIrisForm(interventionFields('course', null, new Date(2025, 5, 1)));
+    const status = Object.fromEntries(result.results.map((r) => [r.key, r.status]));
+    assert.deepEqual(status, { action: 'filled', staff: 'kept', intervention_type: 'filled' });
+    assert.equal(attrs.Action.value[0].id, 'a25');
+    assert.equal(attrs['Intervention Type'].value, 2);
+    assert.equal(attrs['Date of Intervention'].value, null);
+  });
+});
+
+test('fill: says when IRIS has no such option or record', async () => {
+  const { Xrm } = fakeInterventionForm({ sic_action: [], sic_staff: [], sic_support: [] });
+  await withPage({ Xrm }, async () => {
+    const result = await fillIrisForm([
+      ...interventionFields('course', null),
+      { key: 'x', labels: ['Intervention Type'], names: [], type: 'option', value: 'Nope' },
+    ]);
+    const status = result.results.map((r) => r.status);
+    assert.deepEqual(status, ['no-match', 'no-match', 'filled', 'no-match']);
   });
 });

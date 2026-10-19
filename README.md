@@ -43,3 +43,10 @@ npm test
 ```
 
 `extension/vendor/supabase.js` это сборка `@supabase/supabase-js@2.45.4` (UMD), без шага сборки.
+
+## Individual Intervention
+
+На форме **New Individual Intervention** выберите человека в панели и нажмите:
+
+- **Registration**: Action «(год) 09 SUPPORTS TO NEW ARRIVALS» (год первой регистрации), LDC Staff Member (вы, если ещё не выбран), Intervention Type «One-to-one meeting», Date of Intervention = First registered, Support Type «Career guidance», Case Notes «Reg», Personal Plan Agreed, «Has there been a change…» = No.
+- **Course**: Action (текущий год), LDC Staff Member, Intervention Type «Labour market related course». Остальное заполняете сами.
