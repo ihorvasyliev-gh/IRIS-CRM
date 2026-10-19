@@ -31,6 +31,8 @@
 | email | Email |
 | eircode | Eircode, и вводится в Auto Address |
 | dob | Date of Birth (вкладка Registration & Status) |
+| самая ранняя запись на курс (enrollments.created_at) | Date of Registration Meeting |
+| — | CAB/Lot: единственный доступный вариант, а если их несколько, то Cork City (17-1). Уже выбранный не меняется |
 
 Поля ищутся по подписи на форме через клиентский API Dynamics (`Xrm.Page`). Если IRIS переименует поле, панель покажет «field not found».
 

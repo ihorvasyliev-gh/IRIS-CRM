@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CRM → IRIS",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Find a student in the CCP CRM and fill the IRIS (SICAP) New Individual form.",
   "action": {
     "default_title": "CRM → IRIS"
@@ -15,6 +15,8 @@
   "permissions": ["sidePanel", "storage", "scripting", "activeTab"],
   "host_permissions": [
     "https://*.dynamics.com/*",
+    "https://*.autoaddress.ie/*",
+    "https://*.autoaddress.com/*",
     "https://*.supabase.co/*",
     "wss://*.supabase.co/*"
   ]

@@ -54,11 +54,23 @@ export function formatDate(value) {
   return `${String(d).padStart(2, '0')}/${String(mo).padStart(2, '0')}/${y}`;
 }
 
+/** A timestamp → [y, m, d] of that moment in the browser's own time zone, or null. */
+export function localDateParts(timestamp) {
+  if (!timestamp) return null;
+  const d = new Date(timestamp);
+  if (Number.isNaN(d.getTime())) return null;
+  return [d.getFullYear(), d.getMonth() + 1, d.getDate()];
+}
+
+/** The CAB/Lot picked when IRIS offers more than one. */
+export const DEFAULT_CAB_LOT = 'Cork City (17-1)';
+
 /**
  * The IRIS fields this extension fills, found on the form by their label.
  * `names` are logical-name guesses tried when no label matches.
+ * `firstRegisteredAt` is the student's earliest course registration in the CRM.
  */
-export function toIrisFields(student) {
+export function toIrisFields(student, firstRegisteredAt) {
   return [
     { key: 'first_name', labels: ['First Name'], names: ['firstname'], type: 'text', value: (student.first_name || '').trim() },
     { key: 'last_name', labels: ['Last Name'], names: ['lastname'], type: 'text', value: (student.last_name || '').trim() },
@@ -66,6 +78,8 @@ export function toIrisFields(student) {
     { key: 'email', labels: ['Email'], names: ['emailaddress1'], type: 'text', value: (student.email || '').trim() },
     { key: 'eircode', labels: ['Eircode'], names: [], type: 'text', value: (student.eircode || '').trim().toUpperCase() },
     { key: 'dob', labels: ['Date of Birth'], names: ['birthdate'], type: 'date', value: parseIsoDate(student.dob) },
+    { key: 'registration', labels: ['Date of Registration Meeting'], names: [], type: 'date', value: localDateParts(firstRegisteredAt) },
+    { key: 'cab', labels: ['CAB/Lot', 'CAB / Lot'], names: [], type: 'only-lookup', value: DEFAULT_CAB_LOT },
   ];
 }
 
@@ -79,21 +93,40 @@ export function autoAddressQuery(student) {
  * so it must not use anything from outside its own body.
  * Fills fields through the Dynamics client API and never saves the form.
  */
-export function fillIrisForm(fields, addressQuery) {
-  const page = window.Xrm && window.Xrm.Page;
+export async function fillIrisForm(fields) {
+  const Xrm = window.Xrm;
+  const page = Xrm && Xrm.Page;
   if (!page || !page.ui || !page.ui.controls || typeof page.getAttribute !== 'function') {
     return { ok: false, error: 'no-form' };
   }
   const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const controls = page.ui.controls.get() || [];
-  const attrByLabel = (labels) => {
+  const controlByLabel = (labels) => {
     const wanted = labels.map(norm);
     for (const c of controls) {
       if (typeof c.getAttribute !== 'function' || typeof c.getLabel !== 'function') continue;
-      const attr = c.getAttribute();
-      if (attr && wanted.includes(norm(c.getLabel()))) return attr;
+      if (c.getAttribute() && wanted.includes(norm(c.getLabel()))) return c;
     }
     return null;
+  };
+
+  // A lookup with a single sensible choice (CAB/Lot): take the only active
+  // record, or the one named `preferred` when there are several.
+  const onlyLookupValue = async (control, preferred) => {
+    const entity = (control.getEntityTypes && control.getEntityTypes()[0]) || null;
+    if (!entity || !Xrm.WebApi || !Xrm.Utility) throw new Error('lookup not readable');
+    const meta = await Xrm.Utility.getEntityMetadata(entity, []);
+    const id = meta.PrimaryIdAttribute;
+    const name = meta.PrimaryNameAttribute;
+    const select = `?$select=${id},${name}&$top=50`;
+    let rows;
+    try {
+      rows = (await Xrm.WebApi.retrieveMultipleRecords(entity, `${select}&$filter=statecode eq 0`)).entities;
+    } catch (e) {
+      rows = (await Xrm.WebApi.retrieveMultipleRecords(entity, select)).entities;
+    }
+    const pick = rows.length === 1 ? rows[0] : rows.find((r) => norm(r[name]) === norm(preferred));
+    return pick ? [{ id: pick[id], name: pick[name], entityType: entity }] : null;
   };
 
   const results = [];
@@ -102,7 +135,9 @@ export function fillIrisForm(fields, addressQuery) {
       results.push({ key: field.key, status: 'empty' });
       continue;
     }
-    let attr = attrByLabel(field.labels);
+    let attr = null;
+    const control = controlByLabel(field.labels);
+    if (control) attr = control.getAttribute();
     for (const name of field.names) {
       if (attr) break;
       attr = page.getAttribute(name);
@@ -112,9 +147,22 @@ export function fillIrisForm(fields, addressQuery) {
       continue;
     }
     try {
-      const value = field.type === 'date'
-        ? new Date(field.value[0], field.value[1] - 1, field.value[2])
-        : field.value;
+      let value;
+      if (field.type === 'date') {
+        value = new Date(field.value[0], field.value[1] - 1, field.value[2]);
+      } else if (field.type === 'only-lookup') {
+        if (attr.getValue()) {
+          results.push({ key: field.key, status: 'kept' });
+          continue;
+        }
+        value = control ? await onlyLookupValue(control, field.value) : null;
+        if (!value) {
+          results.push({ key: field.key, status: 'choose' });
+          continue;
+        }
+      } else {
+        value = field.value;
+      }
       attr.setValue(value);
       // Lets IRIS run its own rules, e.g. working out the Age Band.
       if (typeof attr.fireOnChange === 'function') attr.fireOnChange();
@@ -124,22 +172,54 @@ export function fillIrisForm(fields, addressQuery) {
     }
   }
 
-  // The Auto Address box is a custom control: type into it so IRIS shows its
-  // suggestions, and the person picks the right one.
-  let address = 'skipped';
-  if (addressQuery) {
-    const input = document.querySelector('input[placeholder*="Full Address" i], input[placeholder*="Postcode" i]');
-    if (input) {
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      input.focus();
-      setter.call(input, addressQuery);
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: ' ' }));
-      address = 'typed';
-    } else {
-      address = 'not-found';
-    }
-  }
+  // Where the frames point, shown when the Auto Address box can't be found.
+  const frames = Array.from(document.querySelectorAll('iframe'))
+    .map((f) => {
+      try {
+        const u = new URL(f.src, location.href);
+        return u.protocol.startsWith('http') ? u.host + u.pathname.slice(0, 80) : '';
+      } catch (e) {
+        return '';
+      }
+    })
+    .filter(Boolean);
 
-  return { ok: true, results, address };
+  return { ok: true, results, frames };
+}
+
+/**
+ * Runs in every frame of the IRIS tab: the Auto Address box lives in its own
+ * frame. Types the query so IRIS shows its suggestions; the person picks one.
+ */
+export function typeAutoAddress(query) {
+  const usable = (el) => !el.disabled && !el.readOnly && el.type !== 'hidden';
+  // The placeholder first; other attributes only as a fallback, without
+  // "postcode", so the form's own "County / Dublin Postcode" field never matches.
+  const tests = [
+    (el) => /full address|postcode/i.test(el.placeholder || ''),
+    (el) => /full address|autoaddress/i.test([el.getAttribute('aria-label'), el.title, el.id, el.name, el.className].join(' ')),
+  ];
+  const find = (root, test) => {
+    for (const el of root.querySelectorAll('input')) {
+      if (usable(el) && test(el)) return el;
+    }
+    // Some custom controls keep their input inside an open shadow root.
+    for (const host of root.querySelectorAll('*')) {
+      if (host.shadowRoot) {
+        const el = find(host.shadowRoot, test);
+        if (el) return el;
+      }
+    }
+    return null;
+  };
+  const input = find(document, tests[0]) || find(document, tests[1]);
+  if (!input) return 'not-found';
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  input.focus();
+  setter.call(input, query);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Unidentified' }));
+  input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Unidentified' }));
+  return 'typed';
 }

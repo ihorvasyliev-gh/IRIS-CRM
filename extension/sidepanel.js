@@ -3,8 +3,10 @@ import {
   buildSearchFilter,
   fillIrisForm,
   formatDate,
+  localDateParts,
   toIrisFields,
   toIrishLocalPhone,
+  typeAutoAddress,
 } from './lib.js';
 
 const $ = (id) => document.getElementById(id);
@@ -16,12 +18,16 @@ const FIELD_NAMES = {
   email: 'Email',
   eircode: 'Eircode',
   dob: 'Date of Birth',
+  registration: 'Date of Registration Meeting',
+  cab: 'CAB/Lot',
 };
 
 let client = null;
 let channel = null;
 let students = [];
 let selectedId = null;
+// Earliest course registration per student id, fetched on selection.
+const firstRegistered = new Map();
 let searchSeq = 0;
 let searchTimer = null;
 
@@ -150,6 +156,18 @@ function select(id) {
   selectedId = id;
   $('fill-report').replaceChildren();
   renderResults();
+  loadFirstRegistration(id);
+}
+
+async function loadFirstRegistration(id) {
+  const { data, error } = await client
+    .from('enrollments')
+    .select('created_at')
+    .eq('student_id', id)
+    .order('created_at', { ascending: true })
+    .limit(1);
+  firstRegistered.set(id, error ? undefined : (data[0] ? data[0].created_at : null));
+  if (id === selectedId) renderSelected();
 }
 
 function renderSelected() {
@@ -163,6 +181,7 @@ function renderSelected() {
     ['Date of birth', formatDate(s.dob)],
     ['Address', s.address],
     ['Eircode', s.eircode],
+    ['First registered', registeredText(s.id)],
   ];
   $('sel-fields').replaceChildren(
     ...rows.flatMap(([label, value]) => {
@@ -175,19 +194,29 @@ function renderSelected() {
   );
 }
 
+function registeredText(id) {
+  if (!firstRegistered.has(id)) return '…';
+  const at = firstRegistered.get(id);
+  if (at === undefined) return 'could not load';
+  const parts = localDateParts(at);
+  return parts ? parts.reverse().map((n) => String(n).padStart(2, '0')).join('/') : 'no course registrations';
+}
+
 $('fill').addEventListener('click', async () => {
   const s = students.find((x) => x.id === selectedId);
   if (!s) return;
   const button = $('fill');
   button.disabled = true;
   try {
+    if (!firstRegistered.has(s.id) || firstRegistered.get(s.id) === undefined) await loadFirstRegistration(s.id);
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       world: 'MAIN',
       func: fillIrisForm,
-      args: [toIrisFields(s), autoAddressQuery(s)],
+      args: [toIrisFields(s, firstRegistered.get(s.id))],
     });
+    if (result && result.ok) result.address = await typeAddress(tab.id, autoAddressQuery(s));
     renderReport(result);
   } catch (e) {
     renderReport({ ok: false, error: String(e && e.message || e) });
@@ -195,6 +224,22 @@ $('fill').addEventListener('click', async () => {
     button.disabled = false;
   }
 });
+
+// The Auto Address box sits in its own frame, so look in all of them.
+async function typeAddress(tabId, query) {
+  if (!query) return 'skipped';
+  try {
+    const frames = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      world: 'MAIN',
+      func: typeAutoAddress,
+      args: [query],
+    });
+    return frames.some((f) => f.result === 'typed') ? 'typed' : 'not-found';
+  } catch (e) {
+    return 'not-found';
+  }
+}
 
 function renderReport(result) {
   const item = (text, cls) => {
@@ -215,12 +260,17 @@ function renderReport(result) {
     empty: 'nothing in the CRM',
     'not-found': 'field not found on the form',
     error: 'IRIS refused the value',
+    kept: 'already chosen, left as is',
+    choose: 'more than one option, choose by hand',
   };
   const lines = result.results.map((r) =>
     item(`${FIELD_NAMES[r.key]}: ${text[r.status]}${r.message ? ` (${r.message})` : ''}`, r.status),
   );
   if (result.address === 'typed') lines.push(item('Auto Address: typed, pick the address from the IRIS list', 'filled'));
-  if (result.address === 'not-found') lines.push(item('Auto Address: box not found, fill the address by hand', 'not-found'));
+  if (result.address === 'not-found') {
+    lines.push(item('Auto Address: box not found, type the Eircode there by hand', 'not-found'));
+    if (result.frames && result.frames.length) lines.push(item(`Frames on the page: ${result.frames.join(', ')}`, 'hint'));
+  }
   lines.push(item('Check the form, finish the rest and save in IRIS.', ''));
   $('fill-report').replaceChildren(...lines);
 }
