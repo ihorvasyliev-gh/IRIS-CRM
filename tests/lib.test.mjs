@@ -178,14 +178,14 @@ test('fill: says so when the page is not an IRIS form', async () => {
 test('Auto Address: types into the box, never into the County / Dublin Postcode field', async () => {
   const county = new FakeInput({ ariaLabel: 'County / Dublin Postcode' });
   const box = new FakeInput({ placeholder: 'Enter Full Address or Postcode' });
-  await withPage({ inputs: [county, box] }, () => {
-    assert.equal(typeAutoAddress('P51X768'), 'typed');
+  await withPage({ inputs: [county, box] }, async () => {
+    assert.equal(await typeAutoAddress('P51X768', 0), 'typed');
     assert.equal(box.value, 'P51X768');
     assert.ok(box.focused);
     assert.ok(box.events.includes('input'));
     assert.equal(county.value, '');
   });
-  await withPage({ inputs: [county] }, () => {
-    assert.equal(typeAutoAddress('P51X768'), 'not-found');
+  await withPage({ inputs: [county] }, async () => {
+    assert.equal(await typeAutoAddress('P51X768', 0), 'not-found');
   });
 });

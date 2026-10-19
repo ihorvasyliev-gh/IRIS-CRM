@@ -235,7 +235,8 @@ async function typeAddress(tabId, query) {
       func: typeAutoAddress,
       args: [query],
     });
-    return frames.some((f) => f.result === 'typed') ? 'typed' : 'not-found';
+    const found = frames.map((f) => f.result);
+    return found.includes('picked') ? 'picked' : found.includes('typed') ? 'typed' : 'not-found';
   } catch (e) {
     return 'not-found';
   }
@@ -266,6 +267,7 @@ function renderReport(result) {
   const lines = result.results.map((r) =>
     item(`${FIELD_NAMES[r.key]}: ${text[r.status]}${r.message ? ` (${r.message})` : ''}`, r.status),
   );
+  if (result.address === 'picked') lines.push(item('Auto Address: the only suggestion was picked, check the address lines', 'filled'));
   if (result.address === 'typed') lines.push(item('Auto Address: typed, pick the address from the IRIS list', 'filled'));
   if (result.address === 'not-found') {
     lines.push(item('Auto Address: box not found, type the Eircode there by hand', 'not-found'));

@@ -29,7 +29,7 @@
 | last_name | Last Name |
 | phone (+353… → 08…) | Mobile No. |
 | email | Email |
-| eircode | Eircode, и вводится в Auto Address |
+| eircode | Eircode, и вводится в Auto Address; если подсказка одна, она выбирается сама |
 | dob | Date of Birth (вкладка Registration & Status) |
 | самая ранняя запись на курс (enrollments.created_at) | Date of Registration Meeting |
 | — | CAB/Lot: единственный доступный вариант, а если их несколько, то Cork City (17-1). Уже выбранный не меняется |

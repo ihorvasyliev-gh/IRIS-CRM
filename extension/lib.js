@@ -189,9 +189,11 @@ export async function fillIrisForm(fields) {
 
 /**
  * Runs in every frame of the IRIS tab: the Auto Address box lives in its own
- * frame. Types the query so IRIS shows its suggestions; the person picks one.
+ * frame. Types the query so IRIS shows its suggestions, then picks the
+ * suggestion when there is exactly one. With several, the person picks.
+ * Returns 'picked', 'typed' or 'not-found'.
  */
-export function typeAutoAddress(query) {
+export async function typeAutoAddress(query, waitMs = 6000) {
   const usable = (el) => !el.disabled && !el.readOnly && el.type !== 'hidden';
   // The placeholder first; other attributes only as a fallback, without
   // "postcode", so the form's own "County / Dublin Postcode" field never matches.
@@ -214,6 +216,24 @@ export function typeAutoAddress(query) {
   };
   const input = find(document, tests[0]) || find(document, tests[1]);
   if (!input) return 'not-found';
+
+  // Suggestion lines: visible blocks with text and no blocks inside them.
+  const lines = () => {
+    const out = [];
+    for (const el of document.body ? document.body.querySelectorAll('*') : []) {
+      if (el === input || el.contains(input) || /^(SCRIPT|STYLE|INPUT|LABEL)$/.test(el.tagName)) continue;
+      const style = getComputedStyle(el);
+      if (style.display === 'inline' || style.display === 'none' || style.visibility === 'hidden') continue;
+      if (!el.getClientRects().length || !el.textContent.trim()) continue;
+      const hasBlockInside = Array.from(el.querySelectorAll('*')).some((child) => {
+        const d = getComputedStyle(child).display;
+        return d !== 'inline' && d !== 'none' && child.textContent.trim();
+      });
+      if (!hasBlockInside) out.push(el);
+    }
+    return out;
+  };
+  const before = waitMs > 0 ? new Set(lines()) : null;
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
   input.focus();
   setter.call(input, query);
@@ -221,5 +241,26 @@ export function typeAutoAddress(query) {
   input.dispatchEvent(new Event('change', { bubbles: true }));
   input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Unidentified' }));
   input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Unidentified' }));
+  if (!before) return 'typed';
+
+  // Wait for the suggestions to arrive and stop changing.
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let last = '';
+  let stable = 0;
+  for (let waited = 0; waited < waitMs; waited += 250) {
+    await sleep(250);
+    const fresh = lines().filter((el) => !before.has(el));
+    const key = fresh.map((el) => el.textContent.trim()).join('\n');
+    stable = key && key === last ? stable + 1 : 0;
+    last = key;
+    if (stable < 2) continue;
+    if (fresh.length !== 1) return 'typed';
+    const choice = fresh[0];
+    for (const type of ['mouseover', 'mousedown', 'mouseup']) {
+      choice.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    }
+    choice.click();
+    return 'picked';
+  }
   return 'typed';
 }
