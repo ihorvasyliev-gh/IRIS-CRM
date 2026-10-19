@@ -1,0 +1,132 @@
+:root {
+  --bg: #fff;
+  --fg: #1f2933;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --accent: #0f6cbd;
+  --accent-soft: #e8f1fb;
+  --ok: #107c10;
+  --warn: #b45309;
+  --bad: #c50f1f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1b1f;
+    --fg: #e5e7eb;
+    --muted: #9ca3af;
+    --line: #34343a;
+    --accent: #4f9fe8;
+    --accent-soft: #1f3550;
+    --ok: #54b054;
+    --warn: #e0a046;
+    --bad: #f1707b;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.4 "Segoe UI", system-ui, sans-serif;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+h2 { font-size: 15px; margin: 8px 0; }
+
+label { display: block; margin-bottom: 8px; }
+
+input {
+  width: 100%;
+  padding: 7px 9px;
+  margin-top: 3px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+button {
+  padding: 7px 14px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled { opacity: 0.6; cursor: default; }
+
+button.link {
+  background: none;
+  color: var(--accent);
+  padding: 0;
+  margin-top: 8px;
+}
+
+.hint { color: var(--muted); margin: 6px 0; }
+.error { color: var(--bad); }
+
+#results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 45vh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+#results:empty { display: none; }
+
+#results li {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+#results li:last-child { border-bottom: 0; }
+#results li:hover { background: var(--accent-soft); }
+#results li.active { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+#results .sub { color: var(--muted); font-size: 12px; }
+
+#selected {
+  margin-top: 12px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 10px;
+  margin: 0 0 12px;
+}
+
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }
+
+#fill { width: 100%; }
+
+#fill-report {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+}
+
+#fill-report .filled { color: var(--ok); }
+#fill-report .empty, #fill-report .not-found { color: var(--warn); }
+#fill-report .error { color: var(--bad); }
+
+header button.link { margin-top: 0; }

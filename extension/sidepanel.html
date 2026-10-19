@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>CRM → IRIS</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+  <script src="vendor/supabase.js"></script>
+  <script type="module" src="sidepanel.js"></script>
+</head>
+<body>
+  <header>
+    <strong>CRM → IRIS</strong>
+    <button id="logout" class="link" hidden>Sign out</button>
+  </header>
+
+  <section id="setup" hidden>
+    <h2>Connect to the CRM</h2>
+    <p class="hint">One-time setup. Both values are in Supabase → Project Settings → API (or in the CRM's <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code>).</p>
+    <form id="setup-form">
+      <label>Supabase URL <input name="url" type="url" placeholder="https://xxxx.supabase.co" required /></label>
+      <label>Anon key <input name="key" type="text" required /></label>
+      <button type="submit">Save</button>
+    </form>
+  </section>
+
+  <section id="login" hidden>
+    <h2>Sign in with your CRM account</h2>
+    <form id="login-form">
+      <label>Email <input name="email" type="email" autocomplete="username" required /></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="error" hidden></p>
+    </form>
+    <button id="reset-setup" class="link">Change CRM connection</button>
+  </section>
+
+  <section id="main" hidden>
+    <input id="search" type="search" placeholder="Name, email, phone or Eircode" autofocus />
+    <p id="search-state" class="hint"></p>
+    <ul id="results"></ul>
+
+    <div id="selected" hidden>
+      <h2 id="sel-name"></h2>
+      <dl id="sel-fields"></dl>
+      <button id="fill">Fill IRIS form</button>
+      <ul id="fill-report"></ul>
+    </div>
+  </section>
+</body>
+</html>
