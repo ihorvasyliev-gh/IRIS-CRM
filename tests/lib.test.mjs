@@ -6,8 +6,15 @@ import {
   fillIrisForm,
   formatDate,
   interventionFields,
+  isoDate,
   localDateParts,
+  monthName,
+  monthStart,
+  outcomeFields,
+  outcomeNote,
+  outcomeOptionFields,
   parseIsoDate,
+  parseTypedDate,
   toIrisFields,
   toIrishLocalPhone,
   typeAutoAddress,
@@ -305,5 +312,194 @@ test('fill: says when IRIS has no such option or record', async () => {
     ]);
     const status = result.results.map((r) => r.status);
     assert.deepEqual(status, ['no-match', 'no-match', 'filled', 'no-match']);
+  });
+});
+
+// The form with its Employment block and Status/Progress fields.
+const OCCUPATIONS = ['Army occupations', 'Communication', 'Sales occupations'];
+const CONTRACTS = ['Full-time', 'Part-time'];
+function fakeOutcomeForm() {
+  const form = fakeInterventionForm({
+    ...TABLES,
+    sic_status: [
+      { id: 'ft', name: 'Employed - Full-Time' },
+      { id: 'pt', name: 'Employed – Part-time' },
+      { id: 'un', name: 'Unemployed - on Live Register' },
+      { id: 'se', name: 'Self-Employed' },
+    ],
+  });
+  const controls = form.Xrm.Page.ui.controls.get();
+  const add = (label, entity, texts) => {
+    const attr = {
+      value: null,
+      getValue() { return this.value; },
+      setValue(v) { this.value = v; },
+      fireOnChange() {},
+      getOptions: () => (texts || []).map((text, i) => ({ value: 100 + i, text })),
+    };
+    form.attrs[label] = attr;
+    controls.push({ getLabel: () => label, getAttribute: () => attr, getEntityTypes: () => (entity ? [entity] : []) });
+  };
+  add('Current Economic Status', 'sic_status');
+  add('Employment Start Date');
+  add('Occupational group', null, ['--Select--', ...OCCUPATIONS]);
+  add('Contract Type', null, CONTRACTS);
+  form.Xrm.Page.ui.controls.get = () => controls;
+  // Tests don't wait for IRIS rules.
+  form.quick = (fields) => fields.map((f) => ({ ...f, pauseMs: 0 }));
+  return form;
+}
+
+const OUTCOME = { interventionDate: '2026-10-12', startDate: '2026-03-01', occupation: 'Sales occupations', contract: 'Part-time', employmentType: 'part_time', text: ' Lidl, Douglas ' };
+
+test('outcome fields: dates, the year of the Action, and what is left for the person', () => {
+  assert.equal(monthStart('2026-03'), '2026-03-01');
+  assert.equal(monthStart('March'), '');
+  assert.equal(monthStart(null), '');
+  assert.equal(isoDate([2026, 3, 1]), '2026-03-01');
+  assert.equal(isoDate(null), '');
+  assert.equal(parseTypedDate('1/3/2026'), '2026-03-01');
+  assert.equal(parseTypedDate(' 01.03.2026 '), '2026-03-01');
+  assert.equal(parseTypedDate('31/02/2026'), '');
+  assert.equal(parseTypedDate('2026-03-01'), '');
+  assert.equal(parseTypedDate(''), '');
+
+  const byKey = Object.fromEntries(outcomeFields(OUTCOME).map((f) => [f.key, f.value]));
+  assert.deepEqual(byKey, {
+    action: { name: 'SUPPORTS TO NEW ARRIVALS', match: 'contains', preferYear: 2026 },
+    staff: true,
+    intervention_date: [2026, 10, 12],
+    case_notes: 'Outcome: working part-time since March 2026 (“Lidl, Douglas”)',
+    status_change: 'Yes',
+    economic_status: { name: 'Employed - Part-Time', match: 'same', search: 'Employed' },
+    employment_start: [2026, 3, 1],
+    occupation: 'Sales occupations',
+    contract: 'Part-time',
+  });
+  const bare = Object.fromEntries(
+    outcomeFields({ interventionDate: '', startDate: '', occupation: '', contract: '', employmentType: null }, new Date(2027, 0, 5))
+      .map((f) => [f.key, f.value]),
+  );
+  assert.equal(bare.action.preferYear, 2027);
+  assert.equal(bare.case_notes, 'Outcome: working');
+  assert.equal(monthName('2026-12-01'), 'December 2026');
+  assert.equal(monthName(''), '');
+  assert.equal(outcomeNote({ text: '', startDate: '2025-11-01', employmentType: 'full_time' }), 'Outcome: working full-time since November 2025');
+  assert.deepEqual(
+    [bare.intervention_date, bare.economic_status, bare.employment_start, bare.occupation, bare.contract],
+    [null, null, null, null, null],
+  );
+});
+
+test('fill: job outcome', async () => {
+  const { attrs, Xrm, quick } = fakeOutcomeForm();
+  await withPage({ Xrm }, async () => {
+    const result = await fillIrisForm(quick(outcomeFields(OUTCOME)));
+    assert.ok(result.results.every((r) => r.status === 'filled'), JSON.stringify(result.results));
+    assert.equal(attrs.Action.value[0].id, 'a26');
+    const d = attrs['Date of Intervention'].value;
+    assert.deepEqual([d.getFullYear(), d.getMonth(), d.getDate()], [2026, 9, 12]);
+    assert.equal(attrs['Case Notes'].value, 'Outcome: working part-time since March 2026 (“Lidl, Douglas”)');
+    assert.equal(attrs['Has there been a change of status or progression outcome for the individual?'].value, 10);
+    // Found whatever the dash and the capitals; never "Unemployed" or "Self-Employed".
+    assert.equal(attrs['Current Economic Status'].value[0].id, 'pt');
+    const start = attrs['Employment Start Date'].value;
+    assert.deepEqual([start.getFullYear(), start.getMonth(), start.getDate()], [2026, 2, 1]);
+    assert.equal(attrs['Occupational group'].value, 103);
+    assert.equal(attrs['Contract Type'].value, 101);
+    // The lists come back with the fill, without the "--Select--" line.
+    assert.deepEqual(result.results.find((r) => r.key === 'occupation').options, OCCUPATIONS);
+    assert.deepEqual(result.results.find((r) => r.key === 'contract').options, CONTRACTS);
+  });
+});
+
+test('fill: an option under a longer name, one IRIS lacks, and one not chosen', async () => {
+  const { attrs, Xrm, quick } = fakeOutcomeForm();
+  await withPage({ Xrm }, async () => {
+    const result = await fillIrisForm(quick(outcomeFields({
+      ...OUTCOME, occupation: 'Communication, warehouse and transport workers', contract: '', employmentType: 'full_time',
+    })));
+    const byKey = Object.fromEntries(result.results.map((r) => [r.key, r]));
+    assert.equal(byKey.occupation.status, 'filled');
+    assert.equal(attrs['Occupational group'].value, 102);
+    assert.equal(attrs['Current Economic Status'].value[0].id, 'ft');
+    assert.equal(byKey.contract.status, 'empty');
+    assert.deepEqual(byKey.contract.options, CONTRACTS);
+    assert.equal(attrs['Contract Type'].value, null);
+
+    const missing = await fillIrisForm(quick(outcomeFields({ ...OUTCOME, occupation: 'Teachers', employmentType: null })));
+    const status = Object.fromEntries(missing.results.map((r) => [r.key, r.status]));
+    assert.equal(status.occupation, 'no-match');
+    assert.equal(status.economic_status, 'empty');
+    // Notes are on the form from the first fill: they stay.
+    assert.equal(status.case_notes, 'kept');
+    assert.deepEqual(missing.results.find((r) => r.key === 'occupation').options, OCCUPATIONS);
+  });
+});
+
+test('fill: read-only returns the lists and changes nothing', async () => {
+  const { attrs, Xrm } = fakeOutcomeForm();
+  await withPage({ Xrm }, async () => {
+    const result = await fillIrisForm(outcomeOptionFields(), true);
+    assert.deepEqual(result.results, [
+      { key: 'occupation', status: 'found', options: OCCUPATIONS },
+      { key: 'contract', status: 'found', options: CONTRACTS },
+    ]);
+    assert.equal(attrs['Occupational group'].value, null);
+  });
+  // A form without the Employment block.
+  const other = fakeInterventionForm(TABLES);
+  await withPage({ Xrm: other.Xrm }, async () => {
+    const result = await fillIrisForm(outcomeOptionFields(), true);
+    assert.deepEqual(result.results.map((r) => r.status), ['not-found', 'not-found']);
+  });
+});
+
+test('fill: a value IRIS wipes is put back once, and reported when wiped again', async () => {
+  const { attrs, Xrm, quick } = fakeOutcomeForm();
+  // A rule that clears the start date the first time it is set.
+  const start = attrs['Employment Start Date'];
+  let wipes = 1;
+  start.fireOnChange = () => { if (wipes-- > 0) start.value = null; };
+  // And one that never lets the contract stay.
+  const contract = attrs['Contract Type'];
+  contract.fireOnChange = () => { contract.value = null; };
+  await withPage({ Xrm }, async () => {
+    const result = await fillIrisForm(quick(outcomeFields(OUTCOME)));
+    const status = Object.fromEntries(result.results.map((r) => [r.key, r.status]));
+    assert.equal(status.employment_start, 'filled');
+    assert.ok(start.value instanceof Date);
+    assert.equal(status.contract, 'cleared');
+    assert.equal(status.occupation, 'filled');
+  });
+});
+
+test('the functions sent into the IRIS page use nothing from outside their own body', async () => {
+  // chrome.scripting.executeScript sends the source text: rebuild them from it, as the page gets them.
+  const rebuilt = (fn) => new Function(`return (${fn.toString()})`)();
+  // Chrome also drops every null property of the arguments.
+  const asChromeSends = (fields) => JSON.parse(JSON.stringify(fields), (_key, value) => (value === null ? undefined : value));
+  const { attrs, Xrm, quick } = fakeOutcomeForm();
+  await withPage({ Xrm }, async () => {
+    const result = await rebuilt(fillIrisForm)(asChromeSends(quick(outcomeFields(OUTCOME))));
+    assert.ok(result.results.every((r) => r.status === 'filled'), JSON.stringify(result.results));
+    assert.equal(attrs['Occupational group'].value, 103);
+
+    const bare = await rebuilt(fillIrisForm)(asChromeSends(quick(outcomeFields({ ...OUTCOME, startDate: '', occupation: '', employmentType: null }))));
+    const status = Object.fromEntries(bare.results.map((r) => [r.key, r.status]));
+    assert.deepEqual([status.employment_start, status.occupation, status.economic_status], ['empty', 'empty', 'empty']);
+
+    const lists = await rebuilt(fillIrisForm)(asChromeSends(outcomeOptionFields()), true);
+    assert.deepEqual(lists.results.map((r) => r.status), ['found', 'found']);
+  });
+  // A student without a date of birth: "nothing in the CRM", not an error.
+  const student = fakeIris(LABELS, []);
+  await withPage({ Xrm: student.Xrm }, async () => {
+    const result = await rebuilt(fillIrisForm)(asChromeSends(toIrisFields({ ...ANNA, dob: null }, null)));
+    assert.equal(result.results.find((r) => r.key === 'dob').status, 'empty');
+  });
+  const box = new FakeInput({ placeholder: 'Enter Full Address or Postcode' });
+  await withPage({ inputs: [box] }, async () => {
+    assert.equal(await rebuilt(typeAutoAddress)('P51X768', 0), 'typed');
   });
 });

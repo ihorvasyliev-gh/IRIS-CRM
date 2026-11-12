@@ -51,6 +51,25 @@
         <button id="int-course" title="Action, staff and Labour market related course; the rest by hand">Course</button>
       </div>
       <ul id="int-report"></ul>
+
+      <h3>Job outcome</h3>
+      <p id="outcome-state" class="hint"></p>
+      <div id="outcome-form" hidden>
+        <p id="outcome-said"></p>
+        <label>Occupational group
+          <select id="out-occupation"></select>
+        </label>
+        <div id="out-chips" class="chips"></div>
+        <p id="out-why" class="hint"></p>
+        <div class="pair">
+          <label>Employment start <input id="out-start" type="text" inputmode="numeric" placeholder="dd/mm/yyyy" autocomplete="off" /></label>
+          <label>Contract type <select id="out-contract"></select></label>
+        </div>
+        <p class="hint under">The CRM knows the month only, so the start is the 1st.</p>
+        <label>Date of intervention <input id="out-date" type="text" inputmode="numeric" placeholder="dd/mm/yyyy" autocomplete="off" /></label>
+        <button id="int-outcome" title="Action, staff, date, a case note, status change Yes, Current Economic Status, Employment Start Date, Occupational group and Contract Type">Fill job outcome</button>
+      </div>
+      <ul id="outcome-report"></ul>
     </div>
   </section>
 </body>

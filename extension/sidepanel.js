@@ -4,11 +4,24 @@ import {
   fillIrisForm,
   formatDate,
   interventionFields,
+  isoDate,
   localDateParts,
+  monthName,
+  monthStart,
+  outcomeFields,
+  outcomeOptionFields,
+  parseTypedDate,
   toIrisFields,
   toIrishLocalPhone,
   typeAutoAddress,
 } from './lib.js';
+import {
+  DEFAULT_OCCUPATION_OPTIONS,
+  guessContract,
+  matchOption,
+  occupationKey,
+  suggestOccupations,
+} from './occupations.js';
 
 const $ = (id) => document.getElementById(id);
 const COLUMNS = 'id, first_name, last_name, email, phone, address, eircode, dob, created_at';
@@ -29,7 +42,12 @@ const FIELD_NAMES = {
   case_notes: 'Case Notes',
   personal_plan: 'Personal Plan Agreed',
   status_change: 'Change of status or progression',
+  economic_status: 'Current Economic Status',
+  employment_start: 'Employment Start Date',
+  occupation: 'Occupational group',
+  contract: 'Contract Type',
 };
+const OUTCOME_COLUMNS = 'is_working, started_month, field_of_work, employment_type, last_responded_at';
 
 let client = null;
 let channel = null;
@@ -37,6 +55,15 @@ let students = [];
 let selectedId = null;
 // Earliest course registration per student id, fetched on selection.
 const firstRegistered = new Map();
+// The outcome survey answer per student id: a row, null for none, undefined when it could not be read.
+const outcomes = new Map();
+// The Occupational group and Contract Type lists, as last read from an IRIS form.
+let irisLists = { occupation: null, contract: null };
+// Earlier choices: { [occupationKey(answer)]: { option, text } } and { full_time | part_time: option }.
+let occupationMemory = {};
+let contractMemory = {};
+// What "Fill job outcome" will send for the selected person.
+let draft = null;
 let searchSeq = 0;
 let searchTimer = null;
 
@@ -46,7 +73,11 @@ function show(section) {
 }
 
 async function start() {
-  const { supabaseUrl, supabaseKey } = await chrome.storage.local.get(['supabaseUrl', 'supabaseKey']);
+  const saved = await chrome.storage.local.get(['supabaseUrl', 'supabaseKey', 'irisLists', 'occupationMemory', 'contractMemory']);
+  const { supabaseUrl, supabaseKey } = saved;
+  irisLists = { ...irisLists, ...saved.irisLists };
+  occupationMemory = saved.occupationMemory || {};
+  contractMemory = saved.contractMemory || {};
   if (!supabaseUrl || !supabaseKey) return show('setup');
 
   client = supabase.createClient(supabaseUrl, supabaseKey);
@@ -75,6 +106,8 @@ function leaveMain() {
   channel = null;
   students = [];
   selectedId = null;
+  draft = null;
+  outcomes.clear();
   show('login');
 }
 
@@ -163,10 +196,27 @@ function renderResults() {
 
 function select(id) {
   selectedId = id;
+  draft = null;
   $('fill-report').replaceChildren();
   $('int-report').replaceChildren();
+  $('outcome-report').replaceChildren();
   renderResults();
   loadFirstRegistration(id);
+  loadOutcome(id);
+}
+
+async function loadOutcome(id) {
+  const { data, error } = await client
+    .from('employment_status')
+    .select(OUTCOME_COLUMNS)
+    .eq('student_id', id)
+    .limit(1);
+  outcomes.set(id, error ? undefined : (data[0] || null));
+  if (id !== selectedId) return;
+  draft = null;
+  renderOutcome();
+  // The real lists, when an IRIS form is already open.
+  if (draft) refreshIrisLists();
 }
 
 async function loadFirstRegistration(id) {
@@ -202,7 +252,243 @@ function renderSelected() {
       return [dt, dd];
     }),
   );
+  renderOutcome();
 }
+
+const occupationList = () => (irisLists.occupation && irisLists.occupation.length ? irisLists.occupation : DEFAULT_OCCUPATION_OPTIONS);
+const contractList = () => irisLists.contract || [];
+
+// Works out the suggestions again; a choice made by hand stays while IRIS still has it.
+function suggestInto(d) {
+  d.suggestions = suggestOccupations(d.text, occupationList(), occupationMemory);
+  d.occupation = d.occupationChosen
+    ? matchOption(occupationList(), [d.occupation]) || ''
+    : (d.suggestions[0] ? d.suggestions[0].option : '');
+  d.contract = d.contractChosen
+    ? matchOption(contractList(), [d.contract]) || ''
+    : guessContract(d.employmentType, contractList(), contractMemory) || '';
+}
+
+function newDraft(studentId, outcome) {
+  const d = {
+    studentId,
+    text: (outcome.field_of_work || '').trim(),
+    employmentType: outcome.employment_type,
+    // The CRM keeps the month only: the 1st, to be corrected when the day is known.
+    start: typedDate(monthStart(outcome.started_month)),
+    // The day the outcome was learned: when the survey was answered.
+    intervention: typedDate(isoDate(localDateParts(outcome.last_responded_at) || localDateParts(Date.now()))),
+    occupation: '',
+    contract: '',
+    occupationChosen: false,
+    contractChosen: false,
+    suggestions: [],
+  };
+  suggestInto(d);
+  return d;
+}
+
+function setOptions(select, options, value, placeholder) {
+  const option = (v, text) => {
+    const el = document.createElement('option');
+    el.value = v;
+    el.textContent = text;
+    return el;
+  };
+  // The list is rebuilt only when it changed, so a refresh never closes an open list.
+  const wanted = ['', ...options];
+  const shown = Array.from(select.options, (el) => el.value);
+  if (shown.length !== wanted.length || shown.some((v, i) => v !== wanted[i]) || select.options[0].textContent !== placeholder) {
+    select.replaceChildren(option('', placeholder), ...options.map((text) => option(text, text)));
+  }
+  select.value = value;
+}
+
+// Dates are typed and shown as IRIS shows them, dd/mm/yyyy, whatever the language of Chrome.
+// One being typed is left alone; one that is not a real day stays as typed, marked.
+function setDate(input, date) {
+  if (document.activeElement !== input) input.value = date.typed;
+  input.classList.toggle('bad', Boolean(date.typed.trim()) && !date.iso);
+}
+
+const typedDate = (iso) => ({ iso, typed: formatDate(iso) });
+
+function readDate(input) {
+  const iso = parseTypedDate(input.value);
+  return iso ? typedDate(iso) : { iso: '', typed: input.value };
+}
+
+/** The day the survey was answered, '12/10/2026'. */
+const answeredOn = (outcome) => formatDate(isoDate(localDateParts(outcome.last_responded_at)));
+
+function whyText() {
+  const hit = draft.suggestions.find((x) => x.option === draft.occupation);
+  if (hit && hit.why.kind === 'remembered') return 'Remembered: you chose it for this answer.';
+  if (hit && hit.why.kind === 'similar') return `You chose it for “${hit.why.text}” before.`;
+  if (hit) return `A guess from “${hit.why.text}”. If it is wrong, change it: your choice is remembered.`;
+  if (draft.occupation) return draft.text ? 'Your choice. It will be remembered for this answer.' : 'Your choice.';
+  if (!draft.text) return 'The CRM has no answer about where they work. Choose the group.';
+  return draft.suggestions.length
+    ? 'Choose the group.'
+    : 'No guess for this answer. Choose the group once: it is remembered for everyone who writes the same.';
+}
+
+function renderOutcome() {
+  const s = students.find((x) => x.id === selectedId);
+  if (!s) return;
+  const outcome = outcomes.get(s.id);
+  const working = Boolean(outcome && outcome.is_working);
+  $('outcome-form').hidden = !working;
+  $('outcome-state').hidden = working;
+  if (!working) {
+    draft = null;
+    const answered = outcome && outcome.last_responded_at ? ` (answered ${answeredOn(outcome)})` : '';
+    $('outcome-state').textContent = !outcomes.has(s.id) ? '…'
+      : outcome === undefined ? 'Could not load the outcome from the CRM.'
+        : outcome && outcome.is_working === false ? `Not working${answered}: nothing to enter.`
+          : 'No answer to the outcome survey yet.';
+    return;
+  }
+  if (!draft || draft.studentId !== s.id) draft = newDraft(s.id, outcome);
+
+  const quote = document.createElement('span');
+  quote.className = 'quote';
+  quote.textContent = draft.text ? `“${draft.text}”` : 'Did not say where';
+  const facts = document.createElement('span');
+  facts.className = 'facts';
+  const since = monthName(monthStart(outcome.started_month));
+  facts.textContent = [
+    { full_time: 'Full-time', part_time: 'Part-time' }[outcome.employment_type],
+    since ? `since ${since}` : '',
+    outcome.last_responded_at ? `answered ${answeredOn(outcome)}` : '',
+  ].filter(Boolean).join(' · ');
+  $('outcome-said').replaceChildren(quote, facts);
+
+  setOptions($('out-occupation'), occupationList(), draft.occupation, 'Choose…');
+  // One tap for the runners-up; with a single guess the list above already shows it.
+  const chips = draft.suggestions.length > 1 ? draft.suggestions.slice(0, 3) : [];
+  $('out-chips').replaceChildren(
+    ...chips.map((suggestion) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = suggestion.option === draft.occupation ? 'chip on' : 'chip';
+      chip.textContent = suggestion.option;
+      chip.addEventListener('click', () => {
+        draft.occupation = suggestion.option;
+        draft.occupationChosen = true;
+        renderOutcome();
+      });
+      return chip;
+    }),
+  );
+  $('out-why').textContent = whyText();
+
+  const contracts = contractList();
+  setOptions($('out-contract'), contracts, draft.contract, contracts.length ? 'Choose…' : 'Open the IRIS form');
+  $('out-contract').disabled = !contracts.length;
+  setDate($('out-start'), draft.start);
+  setDate($('out-date'), draft.intervention);
+}
+
+$('out-occupation').addEventListener('change', (e) => {
+  if (!draft) return;
+  draft.occupation = e.target.value;
+  draft.occupationChosen = true;
+  renderOutcome();
+});
+$('out-contract').addEventListener('change', (e) => {
+  if (!draft) return;
+  draft.contract = e.target.value;
+  draft.contractChosen = true;
+});
+$('out-start').addEventListener('change', (e) => {
+  if (!draft) return;
+  draft.start = readDate(e.target);
+  renderOutcome();
+});
+$('out-date').addEventListener('change', (e) => {
+  if (!draft) return;
+  draft.intervention = readDate(e.target);
+  renderOutcome();
+});
+
+async function runInIris(func, args) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) return { ok: false, error: 'no-form' };
+  const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', func, args });
+  return result;
+}
+
+// Keeps the two lists as IRIS has them; they come back with every read and fill.
+function takeLists(results) {
+  let changed = false;
+  for (const r of results) {
+    if (!(r.key in irisLists) || !r.options || !r.options.length) continue;
+    if (JSON.stringify(r.options) === JSON.stringify(irisLists[r.key])) continue;
+    irisLists = { ...irisLists, [r.key]: r.options };
+    changed = true;
+  }
+  if (!changed) return;
+  chrome.storage.local.set({ irisLists });
+  if (draft) suggestInto(draft);
+  renderOutcome();
+}
+
+// Reads the lists from the IRIS form in the active tab; quietly does nothing when there is none.
+async function refreshIrisLists() {
+  try {
+    const result = await runInIris(fillIrisForm, [outcomeOptionFields(), true]);
+    if (result && result.ok) takeLists(result.results);
+  } catch (e) {
+    // Not an IRIS tab.
+  }
+}
+
+// The form is often opened after the person was picked: look again when the panel is used.
+window.addEventListener('focus', () => { if (draft) refreshIrisLists(); });
+
+// What was sent and landed on the form is what to suggest next time.
+function remember(sent, results) {
+  const filled = (key) => results.some((r) => r.key === key && r.status === 'filled');
+  if (sent.text && sent.occupation && filled('occupation')) {
+    occupationMemory = { ...occupationMemory, [occupationKey(sent.text)]: { option: sent.occupation, text: sent.text } };
+  }
+  if (sent.contract && filled('contract')) {
+    contractMemory = { ...contractMemory, [sent.employmentType || 'unknown']: sent.contract };
+  }
+  chrome.storage.local.set({ occupationMemory, contractMemory });
+  if (draft) suggestInto(draft);
+  renderOutcome();
+}
+
+$('int-outcome').addEventListener('click', async () => {
+  if (!draft) return;
+  const report = $('outcome-report');
+  const buttons = document.querySelectorAll('#selected button');
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    // The form may have been opened since the person was picked: guess again from its own lists.
+    await refreshIrisLists();
+    if (!draft) return;
+    const sent = { ...draft, startDate: draft.start.iso, interventionDate: draft.intervention.iso };
+    const result = await runInIris(fillIrisForm, [outcomeFields(sent)]);
+    if (result && result.ok) {
+      takeLists(result.results);
+      remember(sent, result.results);
+    }
+    renderReport(report, result, {
+      intervention_date: 'no date: type it above as dd/mm/yyyy',
+      economic_status: 'the CRM does not say full-time or part-time, choose by hand',
+      employment_start: 'no date: type it above as dd/mm/yyyy',
+      occupation: 'not chosen: choose it above or on the form',
+      contract: 'not chosen: choose it above or on the form',
+    });
+  } catch (e) {
+    renderReport(report, { ok: false, error: String(e && e.message || e) });
+  } finally {
+    buttons.forEach((b) => { b.disabled = false; });
+  }
+});
 
 function registeredText(id) {
   if (!firstRegistered.has(id)) return '…';
@@ -265,7 +551,8 @@ async function typeAddress(tabId, query) {
   }
 }
 
-function renderReport(list, result) {
+// `emptyText` words an empty field better than "nothing in the CRM", by field key.
+function renderReport(list, result, emptyText = {}) {
   const item = (text, cls) => {
     const li = document.createElement('li');
     li.textContent = text;
@@ -284,13 +571,15 @@ function renderReport(list, result) {
     empty: 'nothing in the CRM',
     'not-found': 'field not found on the form',
     error: 'IRIS refused the value',
-    kept: 'already chosen, left as is',
+    kept: 'already filled, left as is',
     choose: 'more than one option, choose by hand',
     'no-match': 'no such option in IRIS, choose by hand',
+    cleared: 'IRIS cleared the value, fill it by hand',
   };
-  const lines = result.results.map((r) =>
-    item(`${FIELD_NAMES[r.key]}: ${text[r.status]}${r.message ? ` (${r.message})` : ''}`, r.status),
-  );
+  const lines = result.results.map((r) => {
+    const said = (r.status === 'empty' && emptyText[r.key]) || text[r.status];
+    return item(`${FIELD_NAMES[r.key]}: ${said}${r.message ? ` (${r.message})` : ''}`, r.status);
+  });
   if (result.address === 'picked') lines.push(item('Auto Address: the only suggestion was picked, check the address lines', 'filled'));
   if (result.address === 'typed') lines.push(item('Auto Address: typed, pick the address from the IRIS list', 'filled'));
   if (result.address === 'not-found') {

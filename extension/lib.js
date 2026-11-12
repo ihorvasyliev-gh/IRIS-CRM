@@ -86,6 +86,13 @@ export function toIrisFields(student, firstRegisteredAt) {
 /** The Action both intervention buttons pick, for the year in question. */
 export const NEW_ARRIVALS_ACTION = 'SUPPORTS TO NEW ARRIVALS';
 
+const actionField = (year) => ({
+  key: 'action', labels: ['Action'], names: [], type: 'lookup',
+  value: { name: NEW_ARRIVALS_ACTION, match: 'contains', preferYear: year },
+});
+const staffField = () => ({ key: 'staff', labels: ['LDC Staff Member'], names: [], type: 'lookup-me', value: true, keepExisting: true });
+const STATUS_CHANGE = ['Has there been a change of status or progression outcome for the individual?'];
+
 /**
  * Fields for the IRIS "New Individual Intervention" form.
  * 'registration': the one-to-one registration meeting, dated on the student's
@@ -93,11 +100,8 @@ export const NEW_ARRIVALS_ACTION = 'SUPPORTS TO NEW ARRIVALS';
  */
 export function interventionFields(kind, firstRegisteredAt, today = new Date()) {
   const date = localDateParts(firstRegisteredAt);
-  const action = {
-    key: 'action', labels: ['Action'], names: [], type: 'lookup',
-    value: { name: NEW_ARRIVALS_ACTION, match: 'contains', preferYear: kind === 'registration' && date ? date[0] : today.getFullYear() },
-  };
-  const staff = { key: 'staff', labels: ['LDC Staff Member'], names: [], type: 'lookup-me', value: true, keepExisting: true };
+  const action = actionField(kind === 'registration' && date ? date[0] : today.getFullYear());
+  const staff = staffField();
   const type = (text) => ({ key: 'intervention_type', labels: ['Intervention Type'], names: [], type: 'option', value: text });
 
   if (kind === 'course') return [action, staff, type('Labour market related course')];
@@ -109,7 +113,87 @@ export function interventionFields(kind, firstRegisteredAt, today = new Date()) 
     { key: 'support_type', labels: ['Support Type'], names: [], type: 'lookup', value: { name: 'Career guidance', match: 'exact' } },
     { key: 'case_notes', labels: ['Case Notes'], names: [], type: 'text', value: 'Reg' },
     { key: 'personal_plan', labels: ['Personal Plan Agreed'], names: [], type: 'boolean', value: true },
-    { key: 'status_change', labels: ['Has there been a change of status or progression outcome for the individual?'], names: [], type: 'option', value: 'No' },
+    { key: 'status_change', labels: STATUS_CHANGE, names: [], type: 'option', value: 'No' },
+  ];
+}
+
+/** The "Current Economic Status" record for a CRM employment type. */
+export const ECONOMIC_STATUS = { full_time: 'Employed - Full-Time', part_time: 'Employed - Part-Time' };
+
+/** The two lists of the outcome that the panel shows and IRIS decides. */
+const occupationField = (value) => ({ key: 'occupation', labels: ['Occupational group'], names: [], type: 'option', value, recheck: true });
+const contractField = (value) => ({ key: 'contract', labels: ['Contract Type'], names: [], type: 'option', value, recheck: true });
+
+/** Fields whose option lists the panel reads from the open form (see `fillIrisForm`, `readOnly`). */
+export function outcomeOptionFields() {
+  return [occupationField(null), contractField(null)];
+}
+
+/** '2026-03' (the month a job started, as the CRM keeps it) → '2026-03-01'. */
+export function monthStart(month) {
+  return /^\d{4}-\d{2}$/.test(String(month || '')) ? `${month}-01` : '';
+}
+
+/** [2026, 3, 1] → '2026-03-01', the value of a date box. */
+export function isoDate(parts) {
+  return parts ? `${parts[0]}-${String(parts[1]).padStart(2, '0')}-${String(parts[2]).padStart(2, '0')}` : '';
+}
+
+/** '1/3/2026' or '01.03.2026', as people type a date → '2026-03-01'; '' when it is not a real day. */
+export function parseTypedDate(text) {
+  const m = /^\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4})\s*$/.exec(String(text || ''));
+  if (!m) return '';
+  const [day, month, year] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const date = new Date(year, month - 1, day);
+  const real = date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+  return real ? isoDate([year, month, day]) : '';
+}
+
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+/** '2026-03-01' → 'March 2026'. */
+export function monthName(value) {
+  const parts = parseIsoDate(value);
+  return parts && MONTH_NAMES[parts[1] - 1] ? `${MONTH_NAMES[parts[1] - 1]} ${parts[0]}` : '';
+}
+
+/**
+ * The Case Notes line of a job outcome. It keeps the person's own words,
+ * which the Occupational group cannot:
+ * 'Outcome: working part-time since March 2026 (“Lidl warehouse”)'.
+ */
+export function outcomeNote({ text, startDate, employmentType }) {
+  const hours = { full_time: ' full-time', part_time: ' part-time' }[employmentType] || '';
+  const since = monthName(startDate);
+  const where = String(text || '').trim();
+  return `Outcome: working${hours}${since ? ` since ${since}` : ''}${where ? ` (“${where}”)` : ''}`;
+}
+
+/**
+ * Fields for an intervention that records a job outcome: status change "Yes",
+ * the economic status, then the Employment block that IRIS opens for it.
+ * Dates are 'YYYY-MM-DD'; `occupation` and `contract` are option texts chosen
+ * in the panel ('' leaves the field for the person); `text` is the person's
+ * own answer about where they work.
+ */
+export function outcomeFields({ interventionDate, startDate, occupation, contract, employmentType, text }, today = new Date()) {
+  const date = parseIsoDate(interventionDate);
+  const status = ECONOMIC_STATUS[employmentType];
+  return [
+    actionField(date ? date[0] : today.getFullYear()),
+    staffField(),
+    { key: 'intervention_date', labels: ['Date of Intervention'], names: [], type: 'date', value: date },
+    // Notes already typed on the form are not replaced.
+    { key: 'case_notes', labels: ['Case Notes'], names: [], type: 'text', value: outcomeNote({ text, startDate, employmentType }), keepExisting: true },
+    { key: 'status_change', labels: STATUS_CHANGE, names: [], type: 'option', value: 'Yes' },
+    // IRIS shows the Employment block once the status says "employed": give its rules a moment.
+    {
+      key: 'economic_status', labels: ['Current Economic Status'], names: [], type: 'lookup',
+      value: status ? { name: status, match: 'same', search: 'Employed' } : null, pauseMs: 400,
+    },
+    { key: 'employment_start', labels: ['Employment Start Date'], names: [], type: 'date', value: parseIsoDate(startDate), recheck: true },
+    occupationField(occupation || null),
+    contractField(contract || null),
   ];
 }
 
@@ -122,8 +206,10 @@ export function autoAddressQuery(student) {
  * Runs inside the IRIS page (main world) via chrome.scripting.executeScript,
  * so it must not use anything from outside its own body.
  * Fills fields through the Dynamics client API and never saves the form.
+ * With `readOnly` it changes nothing and only reports which fields the form
+ * has, with the option list of each 'option' field.
  */
-export async function fillIrisForm(fields) {
+export async function fillIrisForm(fields, readOnly = false) {
   const Xrm = window.Xrm;
   const page = Xrm && Xrm.Page;
   if (!page || !page.ui || !page.ui.controls || typeof page.getAttribute !== 'function') {
@@ -174,10 +260,13 @@ export async function fillIrisForm(fields) {
 
   // A lookup by record name. With several matches, the one carrying
   // "(preferYear)" wins, else the newest-looking name.
-  const namedLookupValue = async (control, { name, match, preferYear }) => {
+  // 'same' finds the records containing `search` and takes the one whose name
+  // is `name` whatever its dashes, spaces and capitals.
+  const namedLookupValue = async (control, { name, match, preferYear, search }) => {
     const m = await lookupMeta(control);
-    const filter = match === 'contains' ? `contains(${m.name},${odata(name)})` : `${m.name} eq ${odata(name)}`;
-    const rows = await fetchRows(m, filter);
+    const filter = match === 'exact' ? `${m.name} eq ${odata(name)}` : `contains(${m.name},${odata(search || name)})`;
+    let rows = await fetchRows(m, filter);
+    if (match === 'same') rows = rows.filter((r) => norm(r[m.name]) === norm(name));
     if (!rows.length) return null;
     const byYear = preferYear && rows.find((r) => String(r[m.name]).includes(`(${preferYear})`));
     const newest = rows.slice().sort((a, b) => String(b[m.name]).localeCompare(String(a[m.name])))[0];
@@ -193,9 +282,29 @@ export async function fillIrisForm(fields) {
     return v !== null && v !== undefined && v !== '' && !(Array.isArray(v) && !v.length);
   };
 
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const optionTexts = (attr) =>
+    (typeof attr.getOptions === 'function' ? attr.getOptions() || [] : [])
+      .map((o) => String(o.text || '').trim())
+      .filter((text) => text && !/^-+\s*select\s*-+$/i.test(text));
+  // The option with this text; IRIS may have a shorter or longer wording of it.
+  const findOption = (attr, text) => {
+    const options = attr.getOptions() || [];
+    const want = norm(text);
+    return options.find((o) => norm(o.text) === want)
+      || options.find((o) => {
+        const have = norm(o.text);
+        return Math.min(have.length, want.length) >= 6 && (have.startsWith(want) || want.startsWith(have));
+      });
+  };
+
   const results = [];
+  // Fields to look at again once IRIS has run its rules.
+  const recheck = [];
   for (const field of fields) {
-    if (field.value === null || field.value === '') {
+    // Chrome drops null properties on the way into the page, so "no value" arrives as undefined.
+    const empty = field.value === null || field.value === undefined || field.value === '';
+    if (empty && !readOnly && field.type !== 'option') {
       results.push({ key: field.key, status: 'empty' });
       continue;
     }
@@ -208,6 +317,12 @@ export async function fillIrisForm(fields) {
     }
     if (!attr) {
       results.push({ key: field.key, status: 'not-found' });
+      continue;
+    }
+    // The panel keeps its lists in step with IRIS from these.
+    const options = field.type === 'option' ? optionTexts(attr) : undefined;
+    if (readOnly || empty) {
+      results.push({ key: field.key, status: readOnly ? 'found' : 'empty', options });
       continue;
     }
     if ((field.keepExisting || field.type === 'only-lookup') && hasValue(attr)) {
@@ -232,9 +347,9 @@ export async function fillIrisForm(fields) {
           continue;
         }
       } else if (field.type === 'option') {
-        const option = (attr.getOptions() || []).find((o) => norm(o.text) === norm(field.value));
+        const option = findOption(attr, field.value);
         if (!option) {
-          results.push({ key: field.key, status: 'no-match', message: field.value });
+          results.push({ key: field.key, status: 'no-match', message: field.value, options });
           continue;
         }
         value = option.value;
@@ -244,9 +359,25 @@ export async function fillIrisForm(fields) {
       attr.setValue(value);
       // Lets IRIS run its own rules, e.g. working out the Age Band.
       if (typeof attr.fireOnChange === 'function') attr.fireOnChange();
-      results.push({ key: field.key, status: 'filled' });
+      const result = { key: field.key, status: 'filled', options };
+      results.push(result);
+      if (field.recheck) recheck.push({ attr, value, result });
+      if (field.pauseMs) await sleep(field.pauseMs);
     } catch (e) {
       results.push({ key: field.key, status: 'error', message: String(e && e.message || e) });
+    }
+  }
+
+  // A rule of the form may wipe a field it has just revealed. Put the value
+  // back once; if IRIS wipes it again, say so instead of "filled".
+  if (recheck.length) {
+    await sleep(300);
+    for (const { attr, value, result } of recheck) {
+      if (hasValue(attr)) continue;
+      attr.setValue(value);
+      if (typeof attr.fireOnChange === 'function') attr.fireOnChange();
+      await sleep(150);
+      if (!hasValue(attr)) result.status = 'cleared';
     }
   }
 
