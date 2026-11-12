@@ -60,7 +60,21 @@ npm test
 - **Contract type**. Список берётся из IRIS.
 - **Date of intervention**. День, когда человек ответил на опрос.
 
-Кнопка **Fill job outcome** на форме New Individual Intervention заполняет Action (по году интервеншна), LDC Staff Member, Date of Intervention, Case Notes (если там пусто; например `Outcome: working part-time since March 2026 (“Lidl warehouse”)`), «Has there been a change…» = Yes, Current Economic Status (Employed - Full-Time или Employed - Part-Time), Employment Start Date, Occupational group и Contract Type. Intervention Type и Support Type выбираете сами.
+Кнопка **Fill job outcome** на форме New Individual Intervention заполняет:
+
+- Action «(год) 09 SUPPORTS TO NEW ARRIVALS», где год это год, когда человек ответил на опрос;
+- LDC Staff Member;
+- Intervention Type «One-to-one meeting» и Support Type «Career guidance»;
+- Date of Intervention;
+- Case Notes, если там пусто, например `Outcome: working part-time since March 2026 (“Lidl warehouse”)`;
+- «Has there been a change…» = Yes и Current Economic Status (Employed - Full-Time или Employed - Part-Time);
+- Employment Start Date, Occupational group и Contract Type.
+
+### Только те, кто работает
+
+Галочка **Only people who are working** под поиском оставляет в списке тех, кто ответил в опросе, что работает. Сверху самые свежие ответы, под именем написано, где человек работает. Поиск по имени, email, телефону и Eircode продолжает работать внутри этого списка.
+
+После **Fill job outcome** человек получает отметку «filled in IRIS» с датой и при следующем открытии уходит в конец списка, так что сверху всегда те, кого ещё не внесли. Если отметка поставлена зря (форму не сохранили), её снимает **Remove the tick** под блоком. Если человек ответил на опрос ещё раз, отметка снимается сама. Отметки хранятся в этом браузере.
 
 ### Что запоминается
 
@@ -69,3 +83,7 @@ npm test
 Списки Occupational group и Contract Type панель читает с открытой формы IRIS, поэтому они всегда такие же, как там. Пока форма ни разу не открывалась, для Occupational group показывается встроенный список из 25 групп.
 
 Словарь слов для подсказок лежит в `extension/occupations.js`.
+
+## Настройки
+
+Ссылка **Settings** вверху панели. **LDC Staff Member**: кого кнопки интервеншнов (Registration, Course, Fill job outcome) ставят в поле LDC Staff Member. Имя пишется так, как его показывает IRIS; достаточно части, если она есть только у одного человека. Пусто: вы сами (пользователь IRIS), и тогда уже выбранный на форме человек не меняется. Если имя задано, оно ставится всегда.

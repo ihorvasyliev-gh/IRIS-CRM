@@ -136,6 +136,31 @@ h3 { font-size: 13px; margin: 18px 0 8px; }
 li.error { color: var(--bad); }
 
 header button.link { margin-top: 0; }
+header .links { display: flex; gap: 12px; }
+
+#settings {
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+#settings label { margin-bottom: 4px; }
+#settings .hint { margin: 6px 0 0; font-size: 12px; }
+
+label.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  cursor: pointer;
+}
+
+label.check input { width: auto; margin: 0; }
+
+/* The working list: a person whose outcome was already filled into IRIS. */
+#results li.done { color: var(--muted); }
+#results li.done .sub::before { content: "✓ "; color: var(--ok); }
 
 /* Job outcome: the person's own words, then what goes to IRIS. */
 #outcome-said {
@@ -194,3 +219,5 @@ select:disabled { color: var(--muted); }
 .hint.under { margin: -4px 0 10px; font-size: 12px; }
 
 input.bad { border-color: var(--bad); }
+
+#outcome-done button.link { margin-top: 0; }

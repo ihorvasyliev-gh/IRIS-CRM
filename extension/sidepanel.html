@@ -10,7 +10,10 @@
 <body>
   <header>
     <strong>CRM → IRIS</strong>
-    <button id="logout" class="link" hidden>Sign out</button>
+    <span class="links">
+      <button id="open-settings" class="link" hidden aria-expanded="false" aria-controls="settings">Settings</button>
+      <button id="logout" class="link" hidden>Sign out</button>
+    </span>
   </header>
 
   <section id="setup" hidden>
@@ -35,7 +38,15 @@
   </section>
 
   <section id="main" hidden>
+    <div id="settings" hidden>
+      <label>LDC Staff Member
+        <input id="set-staff" type="text" placeholder="You, the signed-in IRIS user" autocomplete="off" />
+      </label>
+      <p class="hint">Who the intervention buttons put as the staff member. Type the name as IRIS shows it, a part of it is enough. Leave empty for yourself.</p>
+    </div>
+
     <input id="search" type="search" placeholder="Name, email, phone or Eircode" autofocus />
+    <label class="check"><input id="working-only" type="checkbox" /> Only people who are working</label>
     <p id="search-state" class="hint"></p>
     <ul id="results"></ul>
 
@@ -70,6 +81,7 @@
         <button id="int-outcome" title="Action, staff, date, a case note, status change Yes, Current Economic Status, Employment Start Date, Occupational group and Contract Type">Fill job outcome</button>
       </div>
       <ul id="outcome-report"></ul>
+      <p id="outcome-done" class="hint" hidden><span id="outcome-done-text"></span> <button id="outcome-undo" class="link">Remove the tick</button></p>
     </div>
   </section>
 </body>

@@ -31,6 +31,22 @@ export function buildSearchFilter(query) {
   return `and(${perWord.map((p) => `or(${p})`).join(',')})`;
 }
 
+/**
+ * The search box applied to people already loaded (the "working" list):
+ * the same rule as `buildSearchFilter`, every word must be in some field.
+ */
+export function matchesSearch(student, query) {
+  const words = String(query || '').replace(UNSAFE, ' ').toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const fields = ['first_name', 'last_name', 'email', 'eircode'].map((col) => String(student[col] || '').toLowerCase());
+  const phone = String(student.phone || '').replace(/\D/g, '');
+  return words.every((word) => {
+    if (fields.some((field) => field.includes(word))) return true;
+    const digits = word.replace(/\D/g, '');
+    if (digits.length < 3 || digits.length !== word.replace(/[\s+\-]/g, '').length) return false;
+    return phone.includes(digits.startsWith('0') ? '353' + digits.slice(1) : digits);
+  });
+}
+
 /** +353871234567 → 0871234567. Foreign numbers stay as they are. */
 export function toIrishLocalPhone(phone) {
   const raw = String(phone || '').trim();
@@ -90,7 +106,13 @@ const actionField = (year) => ({
   key: 'action', labels: ['Action'], names: [], type: 'lookup',
   value: { name: NEW_ARRIVALS_ACTION, match: 'contains', preferYear: year },
 });
-const staffField = () => ({ key: 'staff', labels: ['LDC Staff Member'], names: [], type: 'lookup-me', value: true, keepExisting: true });
+// The staff member named in the panel's settings; with no name, the signed-in
+// IRIS user, and then one already chosen on the form is left alone.
+const staffField = (name) => (String(name || '').trim()
+  ? { key: 'staff', labels: ['LDC Staff Member'], names: [], type: 'lookup', value: { name: String(name).trim(), match: 'one' } }
+  : { key: 'staff', labels: ['LDC Staff Member'], names: [], type: 'lookup-me', value: true, keepExisting: true });
+const typeField = (text) => ({ key: 'intervention_type', labels: ['Intervention Type'], names: [], type: 'option', value: text });
+const supportField = (name) => ({ key: 'support_type', labels: ['Support Type'], names: [], type: 'lookup', value: { name, match: 'exact' } });
 const STATUS_CHANGE = ['Has there been a change of status or progression outcome for the individual?'];
 
 /**
@@ -98,19 +120,18 @@ const STATUS_CHANGE = ['Has there been a change of status or progression outcome
  * 'registration': the one-to-one registration meeting, dated on the student's
  * first course registration. 'course': only the start of a course intervention.
  */
-export function interventionFields(kind, firstRegisteredAt, today = new Date()) {
+export function interventionFields(kind, firstRegisteredAt, today = new Date(), staffName = '') {
   const date = localDateParts(firstRegisteredAt);
   const action = actionField(kind === 'registration' && date ? date[0] : today.getFullYear());
-  const staff = staffField();
-  const type = (text) => ({ key: 'intervention_type', labels: ['Intervention Type'], names: [], type: 'option', value: text });
+  const staff = staffField(staffName);
 
-  if (kind === 'course') return [action, staff, type('Labour market related course')];
+  if (kind === 'course') return [action, staff, typeField('Labour market related course')];
   return [
     action,
     staff,
-    type('One-to-one meeting'),
+    typeField('One-to-one meeting'),
     { key: 'intervention_date', labels: ['Date of Intervention'], names: [], type: 'date', value: date },
-    { key: 'support_type', labels: ['Support Type'], names: [], type: 'lookup', value: { name: 'Career guidance', match: 'exact' } },
+    supportField('Career guidance'),
     { key: 'case_notes', labels: ['Case Notes'], names: [], type: 'text', value: 'Reg' },
     { key: 'personal_plan', labels: ['Personal Plan Agreed'], names: [], type: 'boolean', value: true },
     { key: 'status_change', labels: STATUS_CHANGE, names: [], type: 'option', value: 'No' },
@@ -170,18 +191,23 @@ export function outcomeNote({ text, startDate, employmentType }) {
 }
 
 /**
- * Fields for an intervention that records a job outcome: status change "Yes",
- * the economic status, then the Employment block that IRIS opens for it.
+ * Fields for an intervention that records a job outcome: a one-to-one career
+ * guidance meeting, status change "Yes", the economic status, then the
+ * Employment block that IRIS opens for it.
  * Dates are 'YYYY-MM-DD'; `occupation` and `contract` are option texts chosen
  * in the panel ('' leaves the field for the person); `text` is the person's
- * own answer about where they work.
+ * own answer about where they work and `answeredAt` when they gave it: the
+ * Action is the one of that year.
  */
-export function outcomeFields({ interventionDate, startDate, occupation, contract, employmentType, text }, today = new Date()) {
+export function outcomeFields({ interventionDate, startDate, occupation, contract, employmentType, text, answeredAt, staffName }, today = new Date()) {
   const date = parseIsoDate(interventionDate);
+  const answered = localDateParts(answeredAt);
   const status = ECONOMIC_STATUS[employmentType];
   return [
-    actionField(date ? date[0] : today.getFullYear()),
-    staffField(),
+    actionField((answered || date || [today.getFullYear()])[0]),
+    staffField(staffName),
+    typeField('One-to-one meeting'),
+    supportField('Career guidance'),
     { key: 'intervention_date', labels: ['Date of Intervention'], names: [], type: 'date', value: date },
     // Notes already typed on the form are not replaced.
     { key: 'case_notes', labels: ['Case Notes'], names: [], type: 'text', value: outcomeNote({ text, startDate, employmentType }), keepExisting: true },
@@ -262,11 +288,18 @@ export async function fillIrisForm(fields, readOnly = false) {
   // "(preferYear)" wins, else the newest-looking name.
   // 'same' finds the records containing `search` and takes the one whose name
   // is `name` whatever its dashes, spaces and capitals.
+  // 'one' is for a name a person typed: the record called exactly that, else
+  // the only record containing it; with several it answers 'several'.
   const namedLookupValue = async (control, { name, match, preferYear, search }) => {
     const m = await lookupMeta(control);
     const filter = match === 'exact' ? `${m.name} eq ${odata(name)}` : `contains(${m.name},${odata(search || name)})`;
     let rows = await fetchRows(m, filter);
-    if (match === 'same') rows = rows.filter((r) => norm(r[m.name]) === norm(name));
+    const called = rows.filter((r) => norm(r[m.name]) === norm(name));
+    if (match === 'same') rows = called;
+    if (match === 'one') {
+      if (called.length) rows = [called[0]];
+      else if (rows.length > 1) return 'several';
+    }
     if (!rows.length) return null;
     const byYear = preferYear && rows.find((r) => String(r[m.name]).includes(`(${preferYear})`));
     const newest = rows.slice().sort((a, b) => String(b[m.name]).localeCompare(String(a[m.name])))[0];
@@ -340,8 +373,12 @@ export async function fillIrisForm(fields, readOnly = false) {
           continue;
         }
       } else if (field.type === 'lookup' || field.type === 'lookup-me') {
-        const wanted = field.type === 'lookup-me' ? { name: userName(), match: 'exact' } : field.value;
+        const wanted = field.type === 'lookup-me' ? { name: userName(), match: 'one' } : field.value;
         value = wanted.name ? await namedLookupValue(control, wanted) : null;
+        if (value === 'several') {
+          results.push({ key: field.key, status: 'choose', message: wanted.name });
+          continue;
+        }
         if (!value) {
           results.push({ key: field.key, status: 'no-match', message: wanted.name });
           continue;

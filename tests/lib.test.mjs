@@ -8,6 +8,7 @@ import {
   interventionFields,
   isoDate,
   localDateParts,
+  matchesSearch,
   monthName,
   monthStart,
   outcomeFields,
@@ -368,6 +369,8 @@ test('outcome fields: dates, the year of the Action, and what is left for the pe
   assert.deepEqual(byKey, {
     action: { name: 'SUPPORTS TO NEW ARRIVALS', match: 'contains', preferYear: 2026 },
     staff: true,
+    intervention_type: 'One-to-one meeting',
+    support_type: { name: 'Career guidance', match: 'exact' },
     intervention_date: [2026, 10, 12],
     case_notes: 'Outcome: working part-time since March 2026 (“Lidl, Douglas”)',
     status_change: 'Yes',
@@ -381,6 +384,10 @@ test('outcome fields: dates, the year of the Action, and what is left for the pe
       .map((f) => [f.key, f.value]),
   );
   assert.equal(bare.action.preferYear, 2027);
+  // The Action is the one of the year the person answered, whatever date is put on the intervention.
+  const late = outcomeFields({ ...OUTCOME, interventionDate: '2027-01-05', answeredAt: '2026-12-28T10:00:00' });
+  assert.equal(late.find((f) => f.key === 'action').value.preferYear, 2026);
+  assert.deepEqual(late.find((f) => f.key === 'intervention_date').value, [2027, 1, 5]);
   assert.equal(bare.case_notes, 'Outcome: working');
   assert.equal(monthName('2026-12-01'), 'December 2026');
   assert.equal(monthName(''), '');
@@ -397,6 +404,9 @@ test('fill: job outcome', async () => {
     const result = await fillIrisForm(quick(outcomeFields(OUTCOME)));
     assert.ok(result.results.every((r) => r.status === 'filled'), JSON.stringify(result.results));
     assert.equal(attrs.Action.value[0].id, 'a26');
+    assert.equal(attrs['LDC Staff Member'].value[0].id, 'me');
+    assert.equal(attrs['Intervention Type'].value, 1);
+    assert.equal(attrs['Support Type'].value[0].id, 'cg');
     const d = attrs['Date of Intervention'].value;
     assert.deepEqual([d.getFullYear(), d.getMonth(), d.getDate()], [2026, 9, 12]);
     assert.equal(attrs['Case Notes'].value, 'Outcome: working part-time since March 2026 (“Lidl, Douglas”)');
@@ -502,4 +512,47 @@ test('the functions sent into the IRIS page use nothing from outside their own b
   await withPage({ inputs: [box] }, async () => {
     assert.equal(await rebuilt(typeAutoAddress)('P51X768', 0), 'typed');
   });
+});
+
+test('staff member from the settings: by name, over the one on the form; several matches are left to the person', async () => {
+  const staffOf = (fields) => fields.find((f) => f.key === 'staff');
+  assert.deepEqual(staffOf(interventionFields('course', null, new Date(), ' Someone ')).value, { name: 'Someone', match: 'one' });
+  assert.equal(staffOf(interventionFields('course', null, new Date(), '  ')).type, 'lookup-me');
+  assert.equal(staffOf(outcomeFields({ ...OUTCOME, staffName: 'Someone' })).value.name, 'Someone');
+  assert.equal(staffOf(outcomeFields(OUTCOME)).type, 'lookup-me');
+
+  const tables = { ...TABLES, sic_staff: [{ id: 'me', name: 'Ihor Vasyliev' }, { id: 'ann', name: 'Ann Lee' }, { id: 'ann2', name: 'Ann Lee-Smith' }] };
+  const run = async (name, staffSet = false) => {
+    const { attrs, Xrm } = fakeInterventionForm(tables, { staffSet });
+    let status;
+    await withPage({ Xrm }, async () => {
+      const result = await fillIrisForm(interventionFields('course', null, new Date(2026, 0, 1), name));
+      status = result.results.find((r) => r.key === 'staff').status;
+    });
+    const value = attrs['LDC Staff Member'].value;
+    return [status, value ? value[0].id : null];
+  };
+  // A part of the name is enough when only one person has it.
+  assert.deepEqual(await run('Vasyliev'), ['filled', 'me']);
+  // The form already has someone else: the setting wins.
+  assert.deepEqual(await run('Vasyliev', true), ['filled', 'me']);
+  // The full name of one person, also the start of another's.
+  assert.deepEqual(await run('Ann Lee'), ['filled', 'ann']);
+  assert.deepEqual(await run('Ann'), ['choose', null]);
+  assert.deepEqual(await run('Nobody'), ['no-match', null]);
+  // No name in the settings: the IRIS user, and a chosen one stays.
+  assert.deepEqual(await run(''), ['filled', 'me']);
+  assert.deepEqual(await run('', true), ['kept', 'other']);
+});
+
+test('search over people already loaded follows the CRM search', () => {
+  const anna = { first_name: 'Anna', last_name: 'Kowalska', email: 'a.k@x.ie', phone: '+353871234567', eircode: 'T12 AB34' };
+  assert.equal(matchesSearch(anna, ''), true);
+  assert.equal(matchesSearch(anna, 'anna KOWAL'), true);
+  assert.equal(matchesSearch(anna, 'anna smith'), false);
+  assert.equal(matchesSearch(anna, 't12'), true);
+  assert.equal(matchesSearch(anna, '0871234'), true);
+  assert.equal(matchesSearch(anna, '+35387'), true);
+  assert.equal(matchesSearch(anna, '999'), false);
+  assert.equal(matchesSearch({ first_name: null }, 'x'), false);
 });

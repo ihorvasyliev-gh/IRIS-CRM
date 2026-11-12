@@ -6,6 +6,7 @@ import {
   interventionFields,
   isoDate,
   localDateParts,
+  matchesSearch,
   monthName,
   monthStart,
   outcomeFields,
@@ -51,6 +52,7 @@ const OUTCOME_COLUMNS = 'is_working, started_month, field_of_work, employment_ty
 
 let client = null;
 let channel = null;
+let outcomeChannel = null;
 let students = [];
 let selectedId = null;
 // Earliest course registration per student id, fetched on selection.
@@ -64,20 +66,34 @@ let occupationMemory = {};
 let contractMemory = {};
 // What "Fill job outcome" will send for the selected person.
 let draft = null;
+// When "Fill job outcome" last went through, per student id (an ISO time).
+let outcomeFilled = {};
+// The search lists only people who answered that they are working.
+let workingOnly = false;
+// The LDC Staff Member to put on interventions; '' is the signed-in IRIS user.
+let staffName = '';
 let searchSeq = 0;
 let searchTimer = null;
 
 function show(section) {
   for (const id of ['setup', 'login', 'main']) $(id).hidden = id !== section;
   $('logout').hidden = section !== 'main';
+  $('open-settings').hidden = section !== 'main';
 }
 
 async function start() {
-  const saved = await chrome.storage.local.get(['supabaseUrl', 'supabaseKey', 'irisLists', 'occupationMemory', 'contractMemory']);
+  const saved = await chrome.storage.local.get([
+    'supabaseUrl', 'supabaseKey', 'irisLists', 'occupationMemory', 'contractMemory', 'outcomeFilled', 'workingOnly', 'staffName',
+  ]);
   const { supabaseUrl, supabaseKey } = saved;
   irisLists = { ...irisLists, ...saved.irisLists };
   occupationMemory = saved.occupationMemory || {};
   contractMemory = saved.contractMemory || {};
+  outcomeFilled = saved.outcomeFilled || {};
+  workingOnly = Boolean(saved.workingOnly);
+  staffName = saved.staffName || '';
+  $('working-only').checked = workingOnly;
+  $('set-staff').value = staffName;
   if (!supabaseUrl || !supabaseKey) return show('setup');
 
   client = supabase.createClient(supabaseUrl, supabaseKey);
@@ -99,11 +115,18 @@ function enterMain() {
     .channel('iris-students')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, scheduleSearch)
     .subscribe();
+  // A new survey answer puts the person on the working list at once.
+  outcomeChannel = client
+    .channel('iris-outcomes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'employment_status' }, () => { if (workingOnly) scheduleSearch(); })
+    .subscribe();
 }
 
 function leaveMain() {
   if (channel) client.removeChannel(channel);
+  if (outcomeChannel) client.removeChannel(outcomeChannel);
   channel = null;
+  outcomeChannel = null;
   students = [];
   selectedId = null;
   draft = null;
@@ -147,6 +170,25 @@ $('logout').addEventListener('click', () => client.auth.signOut());
 
 $('search').addEventListener('input', scheduleSearch);
 
+$('working-only').addEventListener('change', (e) => {
+  workingOnly = e.target.checked;
+  chrome.storage.local.set({ workingOnly });
+  runSearch();
+});
+
+$('open-settings').addEventListener('click', (e) => {
+  const open = $('settings').hidden;
+  $('settings').hidden = !open;
+  e.target.setAttribute('aria-expanded', String(open));
+  if (open) $('set-staff').focus();
+});
+
+$('set-staff').addEventListener('change', (e) => {
+  staffName = e.target.value.trim();
+  e.target.value = staffName;
+  chrome.storage.local.set({ staffName });
+});
+
 function scheduleSearch() {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(runSearch, 250);
@@ -155,24 +197,62 @@ function scheduleSearch() {
 async function runSearch() {
   const seq = ++searchSeq;
   const query = $('search').value;
+  const found = await (workingOnly ? findWorking(query) : findStudents(query));
+  if (seq !== searchSeq) return;
+  if (found.error) {
+    $('search-state').textContent = `CRM error: ${found.error.message}`;
+    return;
+  }
+  students = found.students;
+  $('search-state').textContent = found.note;
+  renderResults();
+}
+
+async function findStudents(query) {
   let request = client.from('students').select(COLUMNS);
   const filter = buildSearchFilter(query);
   if (filter) request = request.or(filter);
-  request = request.order('created_at', { ascending: false }).limit(30);
+  const { data, error } = await request.order('created_at', { ascending: false }).limit(30);
+  if (error) return { error };
+  const found = data || [];
+  const note = found.length
+    ? (query.trim() ? '' : 'Newest students:')
+    : (query.trim() ? 'Nobody found.' : 'No students yet. Your role may not allow viewing them.');
+  return { students: found, note };
+}
 
-  const { data, error } = await request;
-  if (seq !== searchSeq) return;
-  if (error) {
-    $('search-state').textContent = `CRM error: ${error.message}`;
-    return;
+// Everyone who answered the outcome survey as working, the newest answers
+// first and the people already filled in IRIS last. The search box narrows it.
+async function findWorking(query) {
+  const { data, error } = await client
+    .from('employment_status')
+    .select(`${OUTCOME_COLUMNS}, students(${COLUMNS})`)
+    .eq('is_working', true)
+    .order('last_responded_at', { ascending: false, nullsFirst: false })
+    .limit(500);
+  if (error) return { error };
+  const found = [];
+  for (const { students: person, ...outcome } of data || []) {
+    const student = Array.isArray(person) ? person[0] : person;
+    if (!student || !matchesSearch(student, query)) continue;
+    outcomes.set(student.id, outcome);
+    found.push(student);
   }
-  students = data || [];
-  if (!students.length) {
-    $('search-state').textContent = query.trim() ? 'Nobody found.' : 'No students yet. Your role may not allow viewing them.';
-  } else {
-    $('search-state').textContent = query.trim() ? '' : 'Newest students:';
-  }
-  renderResults();
+  found.sort((a, b) => Number(isFilled(a.id)) - Number(isFilled(b.id)));
+  const done = found.filter((student) => isFilled(student.id)).length;
+  const note = found.length
+    ? `${found.length} working${done ? `, ${done} already filled in IRIS` : ''}:`
+    : (query.trim() ? 'Nobody working matches the search.' : 'Nobody has answered that they are working yet.');
+  return { students: found, note };
+}
+
+// Filled into an IRIS form from this browser, and the person has not answered again since.
+function isFilled(id) {
+  const at = Date.parse(outcomeFilled[id] || '');
+  if (Number.isNaN(at)) return false;
+  const outcome = outcomes.get(id);
+  const answered = Date.parse((outcome && outcome.last_responded_at) || '');
+  return Number.isNaN(answered) || at >= answered;
 }
 
 function renderResults() {
@@ -180,12 +260,21 @@ function renderResults() {
   list.replaceChildren(
     ...students.map((s) => {
       const li = document.createElement('li');
-      li.className = s.id === selectedId ? 'active' : '';
+      const outcome = workingOnly ? outcomes.get(s.id) : null;
+      const done = Boolean(outcome) && isFilled(s.id);
+      li.className = [s.id === selectedId ? 'active' : '', done ? 'done' : ''].filter(Boolean).join(' ');
       const name = document.createElement('div');
       name.textContent = `${s.first_name || ''} ${s.last_name || ''}`.trim() || '(no name)';
       const sub = document.createElement('div');
       sub.className = 'sub';
-      sub.textContent = [s.email, toIrishLocalPhone(s.phone), formatDate(s.dob)].filter(Boolean).join(' · ');
+      // On the working list the job says more than the contact details.
+      sub.textContent = (outcome
+        ? [
+          done ? `filled in IRIS ${filledOn(s.id)}` : '',
+          outcome.field_of_work ? `“${outcome.field_of_work.trim()}”` : '',
+          outcome.last_responded_at ? `answered ${answeredOn(outcome)}` : '',
+        ]
+        : [s.email, toIrishLocalPhone(s.phone), formatDate(s.dob)]).filter(Boolean).join(' · ');
       li.append(name, sub);
       li.addEventListener('click', () => select(s.id));
       return li;
@@ -276,7 +365,8 @@ function newDraft(studentId, outcome) {
     employmentType: outcome.employment_type,
     // The CRM keeps the month only: the 1st, to be corrected when the day is known.
     start: typedDate(monthStart(outcome.started_month)),
-    // The day the outcome was learned: when the survey was answered.
+    // The day the outcome was learned: when the survey was answered. Its year picks the Action.
+    answeredAt: outcome.last_responded_at,
     intervention: typedDate(isoDate(localDateParts(outcome.last_responded_at) || localDateParts(Date.now()))),
     occupation: '',
     contract: '',
@@ -318,6 +408,9 @@ function readDate(input) {
   return iso ? typedDate(iso) : { iso: '', typed: input.value };
 }
 
+/** The day "Fill job outcome" went through for a person, '12/11/2026'. */
+const filledOn = (id) => formatDate(isoDate(localDateParts(outcomeFilled[id])));
+
 /** The day the survey was answered, '12/10/2026'. */
 const answeredOn = (outcome) => formatDate(isoDate(localDateParts(outcome.last_responded_at)));
 
@@ -342,6 +435,7 @@ function renderOutcome() {
   $('outcome-state').hidden = working;
   if (!working) {
     draft = null;
+    $('outcome-done').hidden = true;
     const answered = outcome && outcome.last_responded_at ? ` (answered ${answeredOn(outcome)})` : '';
     $('outcome-state').textContent = !outcomes.has(s.id) ? '…'
       : outcome === undefined ? 'Could not load the outcome from the CRM.'
@@ -388,7 +482,18 @@ function renderOutcome() {
   $('out-contract').disabled = !contracts.length;
   setDate($('out-start'), draft.start);
   setDate($('out-date'), draft.intervention);
+  $('outcome-done').hidden = !isFilled(s.id);
+  $('outcome-done-text').textContent = isFilled(s.id) ? `Filled in IRIS on ${filledOn(s.id)}.` : '';
 }
+
+// The tick was a mistake (the form was not saved, or it was another person's).
+$('outcome-undo').addEventListener('click', () => {
+  if (!draft) return;
+  const { [draft.studentId]: _gone, ...rest } = outcomeFilled;
+  outcomeFilled = rest;
+  chrome.storage.local.set({ outcomeFilled });
+  renderResults();
+});
 
 $('out-occupation').addEventListener('change', (e) => {
   if (!draft) return;
@@ -470,11 +575,17 @@ $('int-outcome').addEventListener('click', async () => {
     // The form may have been opened since the person was picked: guess again from its own lists.
     await refreshIrisLists();
     if (!draft) return;
-    const sent = { ...draft, startDate: draft.start.iso, interventionDate: draft.intervention.iso };
+    const sent = { ...draft, startDate: draft.start.iso, interventionDate: draft.intervention.iso, staffName };
     const result = await runInIris(fillIrisForm, [outcomeFields(sent)]);
     if (result && result.ok) {
       takeLists(result.results);
       remember(sent, result.results);
+      // The outcome itself reached the form: tick the person on the working list.
+      if (result.results.some((r) => ['economic_status', 'employment_start', 'occupation'].includes(r.key) && r.status === 'filled')) {
+        outcomeFilled = { ...outcomeFilled, [sent.studentId]: new Date().toISOString() };
+        chrome.storage.local.set({ outcomeFilled });
+        renderResults();
+      }
     }
     renderReport(report, result, {
       intervention_date: 'no date: type it above as dd/mm/yyyy',
@@ -529,10 +640,10 @@ $('fill').addEventListener('click', () =>
   }));
 
 $('int-registration').addEventListener('click', () =>
-  fillFromPanel($('int-report'), (_s, at) => interventionFields('registration', at)));
+  fillFromPanel($('int-report'), (_s, at) => interventionFields('registration', at, new Date(), staffName)));
 
 $('int-course').addEventListener('click', () =>
-  fillFromPanel($('int-report'), (_s, at) => interventionFields('course', at)));
+  fillFromPanel($('int-report'), (_s, at) => interventionFields('course', at, new Date(), staffName)));
 
 // The Auto Address box sits in its own frame, so look in all of them.
 async function typeAddress(tabId, query) {
