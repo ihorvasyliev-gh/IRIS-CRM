@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light dark;
   --bg: #fff;
   --fg: #1f2933;
   --muted: #6b7280;
@@ -45,7 +46,7 @@ h2 { font-size: 15px; margin: 8px 0; }
 
 label { display: block; margin-bottom: 8px; }
 
-input {
+input, select {
   width: 100%;
   padding: 7px 9px;
   margin-top: 3px;
@@ -124,14 +125,99 @@ h3 { font-size: 13px; margin: 18px 0 8px; }
 .buttons { display: flex; gap: 8px; }
 .buttons button { flex: 1; }
 
-#fill-report, #int-report {
+#fill-report, #int-report, #outcome-report {
   list-style: none;
   padding: 0;
   margin: 10px 0 0;
 }
 
 .filled { color: var(--ok); }
-.empty, .not-found, .no-match, .choose { color: var(--warn); }
+.empty, .not-found, .no-match, .choose, .cleared { color: var(--warn); }
 li.error { color: var(--bad); }
 
 header button.link { margin-top: 0; }
+header .links { display: flex; gap: 12px; }
+
+#settings {
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+#settings label { margin-bottom: 4px; }
+#settings .hint { margin: 6px 0 0; font-size: 12px; }
+
+label.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  cursor: pointer;
+}
+
+label.check input { width: auto; margin: 0; }
+
+/* The working list: a person whose outcome was already filled into IRIS. */
+#results li.done { color: var(--muted); }
+#results li.done .sub::before { content: "✓ "; color: var(--ok); }
+
+/* Job outcome: the person's own words, then what goes to IRIS. */
+#outcome-said {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+}
+
+#outcome-said .quote {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+#outcome-said .facts { color: var(--muted); font-size: 12px; }
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -2px 0 6px;
+}
+
+.chips:empty { display: none; }
+
+.chip {
+  max-width: 100%;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  color: var(--fg);
+  font-size: 12px;
+  text-align: left;
+}
+
+.chip:hover { border-color: var(--accent); }
+.chip.on { border-color: var(--accent); background: var(--accent-soft); }
+
+#out-why { margin: 0 0 10px; }
+
+.pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.pair label { min-width: 0; }
+
+select:disabled { color: var(--muted); }
+
+#int-outcome { width: 100%; margin-top: 2px; }
+
+.hint.under { margin: -4px 0 10px; font-size: 12px; }
+
+input.bad { border-color: var(--bad); }
+
+#outcome-done button.link { margin-top: 0; }
