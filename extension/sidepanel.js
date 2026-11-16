@@ -85,7 +85,12 @@ async function start() {
   const saved = await chrome.storage.local.get([
     'supabaseUrl', 'supabaseKey', 'irisLists', 'occupationMemory', 'contractMemory', 'outcomeFilled', 'workingOnly', 'staffName',
   ]);
-  const { supabaseUrl, supabaseKey } = saved;
+  // A connection baked into config.js wins over the one typed in the setup form.
+  const preset = self.CRM_CONFIG || {};
+  const baked = Boolean(preset.supabaseUrl && preset.supabaseKey);
+  const supabaseUrl = baked ? preset.supabaseUrl.trim().replace(/\/+$/, '') : saved.supabaseUrl;
+  const supabaseKey = baked ? preset.supabaseKey.trim() : saved.supabaseKey;
+  $('reset-setup').hidden = baked;
   irisLists = { ...irisLists, ...saved.irisLists };
   occupationMemory = saved.occupationMemory || {};
   contractMemory = saved.contractMemory || {};
