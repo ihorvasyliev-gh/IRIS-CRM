@@ -64,6 +64,8 @@ test('IRIS fields and Auto Address query from a student', () => {
     cab: 'Cork City (17-1)',
   });
   assert.equal(toIrisFields(student, null).find((f) => f.key === 'registration').value, null);
+  assert.equal(toIrisFields(student, null, '  ').find((f) => f.key === 'staff'), undefined);
+  assert.deepEqual(toIrisFields(student, null, ' Olena ').find((f) => f.key === 'staff').value, { name: 'Olena', match: 'one' });
   assert.equal(autoAddressQuery(student), 'T12 AB34');
   assert.equal(autoAddressQuery({ address: '1 Main St' }), '1 Main St');
 });

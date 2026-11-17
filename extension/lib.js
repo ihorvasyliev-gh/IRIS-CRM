@@ -86,8 +86,8 @@ export const DEFAULT_CAB_LOT = 'Cork City (17-1)';
  * `names` are logical-name guesses tried when no label matches.
  * `firstRegisteredAt` is the student's earliest course registration in the CRM.
  */
-export function toIrisFields(student, firstRegisteredAt) {
-  return [
+export function toIrisFields(student, firstRegisteredAt, staffName = '') {
+  const fields = [
     { key: 'first_name', labels: ['First Name'], names: ['firstname'], type: 'text', value: (student.first_name || '').trim() },
     { key: 'last_name', labels: ['Last Name'], names: ['lastname'], type: 'text', value: (student.last_name || '').trim() },
     { key: 'mobile', labels: ['Mobile No.', 'Mobile No', 'Mobile Phone'], names: ['mobilephone'], type: 'text', value: toIrishLocalPhone(student.phone) },
@@ -97,6 +97,9 @@ export function toIrisFields(student, firstRegisteredAt) {
     { key: 'registration', labels: ['Date of Registration Meeting'], names: [], type: 'date', value: localDateParts(firstRegisteredAt) },
     { key: 'cab', labels: ['CAB/Lot', 'CAB / Lot'], names: [], type: 'only-lookup', value: DEFAULT_CAB_LOT },
   ];
+  // IRIS already puts the signed-in user on a new individual, so only a name from the settings changes it.
+  if (String(staffName || '').trim()) fields.push(staffField(staffName));
+  return fields;
 }
 
 /** The Action both intervention buttons pick, for the year in question. */

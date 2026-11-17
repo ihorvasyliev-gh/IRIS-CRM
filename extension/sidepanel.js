@@ -659,7 +659,7 @@ async function fillFromPanel(report, buildFields, after) {
 }
 
 $('fill').addEventListener('click', () =>
-  fillFromPanel($('fill-report'), toIrisFields, async (result, tab, s) => {
+  fillFromPanel($('fill-report'), (s, at) => toIrisFields(s, at, staffName), async (result, tab, s) => {
     result.address = await typeAddress(tab.id, autoAddressQuery(s));
   }));
 
