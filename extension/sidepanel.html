@@ -5,12 +5,13 @@
   <title>CRM → IRIS</title>
   <link rel="stylesheet" href="sidepanel.css" />
   <script src="vendor/supabase.js"></script>
+  <!-- config.js is optional (see config.example.js); without it the panel asks for the connection. -->
   <script src="config.js"></script>
   <script type="module" src="sidepanel.js"></script>
 </head>
 <body>
   <header>
-    <strong>CRM → IRIS</strong>
+    <strong>CRM → IRIS <small id="version" class="hint"></small></strong>
     <span class="links">
       <button id="open-settings" class="link" hidden aria-expanded="false" aria-controls="settings">Settings</button>
       <button id="logout" class="link" hidden>Sign out</button>

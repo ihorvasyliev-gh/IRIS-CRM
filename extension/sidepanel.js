@@ -81,6 +81,8 @@ function show(section) {
   $('open-settings').hidden = section !== 'main';
 }
 
+$('version').textContent = `v${chrome.runtime.getManifest().version}`;
+
 async function start() {
   const saved = await chrome.storage.local.get([
     'supabaseUrl', 'supabaseKey', 'irisLists', 'occupationMemory', 'contractMemory', 'outcomeFilled', 'workingOnly', 'staffName',
