@@ -513,3 +513,132 @@ export async function typeAutoAddress(query, waitMs = 6000) {
   }
   return 'typed';
 }
+
+/** The last 7 digits of a phone number, which IRIS and the CRM write in different ways. */
+export function phoneTail(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 7 ? digits.slice(-7) : '';
+}
+
+/** Who to look for in IRIS before a new individual is filled in. */
+export function duplicateQuery(student) {
+  return {
+    first: (student.first_name || '').trim(),
+    last: (student.last_name || '').trim(),
+    email: (student.email || '').trim(),
+    phoneTail: phoneTail(student.phone),
+    dob: parseIsoDate(student.dob) ? String(student.dob).slice(0, 10) : '',
+  };
+}
+
+/**
+ * A match deserves a stop before filling when it shares the email, the phone,
+ * or the name together with the date of birth. A namesake alone is only shown.
+ */
+export function isStrongMatch(match) {
+  const why = match.why || [];
+  return why.includes('email') || why.includes('phone') || (why.includes('name') && why.includes('date of birth'));
+}
+
+/**
+ * Runs inside the IRIS page (main world). Says which kind of form is open:
+ * 'individual' (has First Name and Last Name), 'intervention' (has Intervention
+ * Type), 'other' for any other form, 'none' when no form is open.
+ */
+export function irisFormInfo() {
+  const Xrm = window.Xrm;
+  const page = Xrm && Xrm.Page;
+  if (!page || !page.ui || !page.ui.controls || !page.data || !page.data.entity) return { kind: 'none' };
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const labels = new Set((page.ui.controls.get() || [])
+    .filter((c) => typeof c.getLabel === 'function')
+    .map((c) => norm(c.getLabel())));
+  let kind = 'other';
+  if (labels.has('interventiontype')) kind = 'intervention';
+  else if (labels.has('firstname') && labels.has('lastname')) kind = 'individual';
+  const isNew = typeof page.ui.getFormType === 'function' && page.ui.getFormType() === 1;
+  return { kind, isNew, entity: page.data.entity.getEntityName() };
+}
+
+/**
+ * Runs inside the IRIS page (main world), on an individual's form. Looks for
+ * other individuals with the same email, the same phone (its last 7 digits) or
+ * the same first and last name. The fields are found by their labels on the
+ * open form, so their names never have to be guessed.
+ */
+export async function findIrisDuplicates(person) {
+  const Xrm = window.Xrm;
+  const page = Xrm && Xrm.Page;
+  if (!page || !page.ui || !page.ui.controls || !page.data || !page.data.entity || !Xrm.WebApi || !Xrm.Utility) {
+    return { ok: false, error: 'no-form' };
+  }
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const controls = (page.ui.controls.get() || []).filter((c) =>
+    typeof c.getAttribute === 'function' && typeof c.getLabel === 'function' && c.getAttribute());
+  const attrName = (labels) => {
+    const wanted = labels.map(norm);
+    const control = controls.find((c) => wanted.includes(norm(c.getLabel())));
+    return control ? control.getAttribute().getName() : null;
+  };
+  const f = {
+    first: attrName(['First Name']),
+    last: attrName(['Last Name']),
+    email: attrName(['Email']),
+    phone: attrName(['Mobile No.', 'Mobile No', 'Mobile Phone']),
+    dob: attrName(['Date of Birth']),
+  };
+  if (!f.first || !f.last) return { ok: false, error: 'not-individual' };
+  try {
+    const entity = page.data.entity.getEntityName();
+    const meta = await Xrm.Utility.getEntityMetadata(entity, []);
+    const odata = (text) => `'${String(text).replace(/'/g, "''")}'`;
+    const ors = [];
+    if (person.email && f.email) ors.push(`${f.email} eq ${odata(person.email)}`);
+    if (person.phoneTail && f.phone) {
+      // "0871234567" and "087 123 4567" both end in 1234567 / 123 4567.
+      ors.push(`contains(${f.phone},${odata(person.phoneTail)})`);
+      ors.push(`contains(${f.phone},${odata(`${person.phoneTail.slice(0, 3)} ${person.phoneTail.slice(3)}`)})`);
+    }
+    if (person.first && person.last) ors.push(`(${f.first} eq ${odata(person.first)} and ${f.last} eq ${odata(person.last)})`);
+    if (!ors.length) return { ok: true, matches: [] };
+    const columns = [...new Set([meta.PrimaryIdAttribute, meta.PrimaryNameAttribute, ...Object.values(f).filter(Boolean)])];
+    const found = await Xrm.WebApi.retrieveMultipleRecords(entity, `?$select=${columns.join(',')}&$filter=${ors.join(' or ')}&$top=10`);
+
+    const currentId = String(page.data.entity.getId() || '').replace(/[{}]/g, '').toLowerCase();
+    const digits = (s) => String(s || '').replace(/\D/g, '');
+    // A date-only field comes back as "1990-04-23"; a date-time one as a moment, read in local time.
+    const day = (v) => {
+      if (!v) return '';
+      const s = String(v);
+      if (!s.includes('T')) return s.slice(0, 10);
+      const d = new Date(s);
+      return Number.isNaN(d.getTime()) ? '' : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    const ctx = Xrm.Utility.getGlobalContext();
+    const base = ctx && ctx.getClientUrl ? ctx.getClientUrl() : location.origin;
+    const appId = new URLSearchParams(location.search).get('appid');
+    const matches = found.entities
+      .filter((r) => String(r[meta.PrimaryIdAttribute]).toLowerCase() !== currentId)
+      .map((r) => {
+        const dob = f.dob ? day(r[f.dob]) : '';
+        const why = [];
+        if (person.email && f.email && String(r[f.email] || '').trim().toLowerCase() === person.email.toLowerCase()) why.push('email');
+        if (person.phoneTail && f.phone && digits(r[f.phone]).endsWith(person.phoneTail)) why.push('phone');
+        if (norm(r[f.first]) === norm(person.first) && norm(r[f.last]) === norm(person.last)) why.push('name');
+        if (person.dob && dob === person.dob) why.push('date of birth');
+        const id = r[meta.PrimaryIdAttribute];
+        return {
+          name: r[meta.PrimaryNameAttribute] || `${r[f.first] || ''} ${r[f.last] || ''}`.trim(),
+          email: f.email ? r[f.email] || '' : '',
+          phone: f.phone ? r[f.phone] || '' : '',
+          dob,
+          why,
+          url: `${base}/main.aspx?${appId ? `appid=${encodeURIComponent(appId)}&` : ''}pagetype=entityrecord&etn=${entity}&id=${id}`,
+        };
+      })
+      .filter((m) => m.why.some((w) => w !== 'date of birth'));
+    return { ok: true, matches };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e) };
+  }
+}

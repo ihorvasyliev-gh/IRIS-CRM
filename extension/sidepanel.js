@@ -1,9 +1,13 @@
 import {
   autoAddressQuery,
   buildSearchFilter,
+  duplicateQuery,
+  findIrisDuplicates,
   fillIrisForm,
   formatDate,
   interventionFields,
+  irisFormInfo,
+  isStrongMatch,
   isoDate,
   localDateParts,
   matchesSearch,
@@ -72,6 +76,10 @@ let outcomeFilled = {};
 let workingOnly = false;
 // The LDC Staff Member to put on interventions; '' is the signed-in IRIS user.
 let staffName = '';
+// The kind of IRIS form open in the active tab: { kind: 'individual' | 'intervention' | 'other' | 'none', isNew }.
+let formInfo = { kind: 'none' };
+// The IRIS duplicate check per student id: { state: 'checking' | 'done' | 'error', matches, error, confirmed, stopped }.
+const dupChecks = new Map();
 let searchSeq = 0;
 let searchTimer = null;
 
@@ -134,6 +142,7 @@ function enterMain() {
   show('main');
   $('search').focus();
   runSearch();
+  refreshFormInfo();
   // Live updates: any change to students in the CRM refreshes the list.
   channel = client
     .channel('iris-students')
@@ -313,6 +322,9 @@ function select(id) {
   $('fill-report').replaceChildren();
   $('int-report').replaceChildren();
   $('outcome-report').replaceChildren();
+  // A fresh look in IRIS for every pick: the person may have been added since.
+  dupChecks.delete(id);
+  if (formInfo.kind === 'individual') checkDuplicates(id);
   renderResults();
   loadFirstRegistration(id);
   loadOutcome(id);
@@ -365,6 +377,7 @@ function renderSelected() {
       return [dt, dd];
     }),
   );
+  renderDuplicates();
   renderOutcome();
 }
 
@@ -658,10 +671,158 @@ async function fillFromPanel(report, buildFields, after) {
   }
 }
 
-$('fill').addEventListener('click', () =>
+$('fill').addEventListener('click', async () => {
+  const id = selectedId;
+  if (!id) return;
+  const prior = dupChecks.get(id);
+  if (!(prior && prior.confirmed)) {
+    // Look in IRIS right before creating anyone; stop when the person seems to be there already.
+    await checkDuplicates(id);
+    const check = dupChecks.get(id);
+    if (id !== selectedId) return;
+    if (check && check.state === 'done' && check.matches.some(isStrongMatch)) {
+      check.stopped = true;
+      renderDuplicates();
+      return;
+    }
+  }
+  fillIndividual();
+});
+
+function fillIndividual() {
   fillFromPanel($('fill-report'), (s, at) => toIrisFields(s, at, staffName), async (result, tab, s) => {
     result.address = await typeAddress(tab.id, autoAddressQuery(s));
-  }));
+  });
+}
+
+// Which IRIS form is open. The buttons for another kind of form turn into outlines.
+async function refreshFormInfo() {
+  let info = { kind: 'none' };
+  try {
+    const result = await runInIris(irisFormInfo, []);
+    if (result && result.kind) info = result;
+  } catch (e) {
+    // Not an IRIS tab, or a page the extension may not touch.
+  }
+  const changed = info.kind !== formInfo.kind || info.isNew !== formInfo.isNew;
+  formInfo = info;
+  if (changed) renderFormInfo();
+  if (info.kind === 'individual' && selectedId && !dupChecks.has(selectedId)) checkDuplicates(selectedId);
+}
+
+function renderFormInfo() {
+  const el = $('iris-form');
+  const known = formInfo.kind === 'individual' || formInfo.kind === 'intervention';
+  el.hidden = false;
+  el.classList.toggle('on', known);
+  if (known) {
+    const name = document.createElement('strong');
+    name.textContent = `${formInfo.isNew ? 'New ' : ''}${formInfo.kind === 'individual' ? 'Individual' : 'Individual Intervention'}`;
+    el.replaceChildren('IRIS: ', name, ' form is open');
+  } else {
+    el.textContent = formInfo.kind === 'other' ? 'IRIS: another form is open' : 'No IRIS form in this tab';
+  }
+  for (const button of document.querySelectorAll('button[data-form]')) {
+    button.classList.toggle('other-form', known && button.dataset.form !== formInfo.kind);
+  }
+  renderDuplicates();
+}
+
+setInterval(() => {
+  if (document.visibilityState === 'visible' && !$('main').hidden) refreshFormInfo();
+}, 2000);
+chrome.tabs.onActivated.addListener(() => { if (!$('main').hidden) refreshFormInfo(); });
+chrome.tabs.onUpdated.addListener((_tabId, change) => { if (change.status === 'complete' && !$('main').hidden) refreshFormInfo(); });
+
+// Looks in IRIS for the selected person. Needs an individual's form open in the tab;
+// without one the check is simply not shown.
+async function checkDuplicates(id) {
+  const s = students.find((x) => x.id === id);
+  if (!s) return;
+  const confirmed = Boolean(dupChecks.get(id) && dupChecks.get(id).confirmed);
+  dupChecks.set(id, { state: 'checking', confirmed });
+  if (id === selectedId) renderDuplicates();
+  let result;
+  try {
+    result = await runInIris(findIrisDuplicates, [duplicateQuery(s)]);
+  } catch (e) {
+    result = { ok: false, error: String(e && e.message || e) };
+  }
+  if (result && result.ok) dupChecks.set(id, { state: 'done', matches: result.matches, confirmed });
+  else if (!result || result.error === 'no-form') dupChecks.delete(id);
+  // The form has no name fields to search by: nothing to show, and no point asking again.
+  else if (result.error === 'not-individual') dupChecks.set(id, { state: 'skip', confirmed });
+  else dupChecks.set(id, { state: 'error', error: result.error, confirmed });
+  if (id === selectedId) renderDuplicates();
+}
+
+const WHY_TEXT = { email: 'email', phone: 'phone', name: 'name', 'date of birth': 'date of birth' };
+
+function renderDuplicates() {
+  const box = $('dup');
+  const found = selectedId ? dupChecks.get(selectedId) : null;
+  // Only on an individual's form (or while the form is not known yet), where it matters.
+  const elsewhere = formInfo.kind === 'intervention' || formInfo.kind === 'other';
+  const check = found && found.state !== 'skip' && !elsewhere ? found : null;
+  box.hidden = !check;
+  if (!check) {
+    box.replaceChildren();
+    return;
+  }
+  if (check.state === 'checking') {
+    box.className = 'dup info';
+    box.textContent = 'Looking for this person in IRIS…';
+    return;
+  }
+  if (check.state === 'error') {
+    box.className = 'dup info';
+    box.textContent = `Could not look in IRIS for duplicates (${check.error}).`;
+    return;
+  }
+  if (!check.matches.length) {
+    box.className = 'dup ok';
+    box.textContent = '✓ Not in IRIS yet: no one with this email, phone or name.';
+    return;
+  }
+  const strong = check.matches.some(isStrongMatch);
+  box.className = strong ? 'dup warn' : 'dup info';
+  const head = document.createElement(strong ? 'strong' : 'span');
+  head.textContent = strong
+    ? (check.matches.length > 1 ? 'Already in IRIS? These records look like this person:' : 'Already in IRIS? This record looks like this person:')
+    : 'IRIS has someone with the same name, with other details:';
+  const list = document.createElement('ul');
+  for (const m of check.matches) {
+    const li = document.createElement('li');
+    const link = document.createElement('a');
+    link.href = m.url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = m.name || '(no name)';
+    const details = [m.email, m.phone, formatDate(m.dob)].filter(Boolean).join(' · ');
+    li.append(link, `${details ? ` · ${details}` : ''} (same ${m.why.map((w) => WHY_TEXT[w] || w).join(', ')})`);
+    list.append(li);
+  }
+  box.replaceChildren(head, list);
+  if (!strong) return;
+  const note = document.createElement('p');
+  note.className = 'hint';
+  if (check.confirmed) {
+    note.textContent = 'You chose to fill the form anyway.';
+  } else {
+    note.append(check.stopped ? 'Nothing was filled. Open the record above, or ' : 'Open the record above instead of making a new one, or ');
+    const anyway = document.createElement('button');
+    anyway.type = 'button';
+    anyway.className = 'link';
+    anyway.textContent = 'fill anyway';
+    anyway.addEventListener('click', () => {
+      check.confirmed = true;
+      renderDuplicates();
+      fillIndividual();
+    });
+    note.append(anyway, '.');
+  }
+  box.append(note);
+}
 
 $('int-registration').addEventListener('click', () =>
   fillFromPanel($('int-report'), (_s, at) => interventionFields('registration', at, new Date(), staffName)));
