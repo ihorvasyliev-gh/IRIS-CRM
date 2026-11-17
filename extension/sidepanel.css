@@ -221,3 +221,16 @@ select:disabled { color: var(--muted); }
 input.bad { border-color: var(--bad); }
 
 #outcome-done button.link { margin-top: 0; }
+
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+}
+.update-banner[hidden] { display: none; }
+.update-banner button { margin: 0; }

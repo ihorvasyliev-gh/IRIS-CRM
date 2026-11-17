@@ -83,6 +83,23 @@ function show(section) {
 
 $('version').textContent = `v${chrome.runtime.getManifest().version}`;
 
+// Installed with "Load unpacked", the extension reads its files from a folder (for example one synced by
+// OneDrive), but the browser keeps running the version it loaded. When the folder holds a newer
+// manifest, offer to reload.
+async function checkForUpdate() {
+  try {
+    const onDisk = await (await fetch(chrome.runtime.getURL('manifest.json'), { cache: 'no-store' })).json();
+    if (onDisk.version === chrome.runtime.getManifest().version) return;
+    $('update-text').textContent = `Version ${onDisk.version} is ready.`;
+    $('update-banner').hidden = false;
+  } catch (error) {
+    console.error(error);
+  }
+}
+$('update-now').addEventListener('click', () => chrome.runtime.reload());
+checkForUpdate();
+setInterval(checkForUpdate, 10 * 60 * 1000);
+
 async function start() {
   const saved = await chrome.storage.local.get([
     'supabaseUrl', 'supabaseKey', 'irisLists', 'occupationMemory', 'contractMemory', 'outcomeFilled', 'workingOnly', 'staffName',
