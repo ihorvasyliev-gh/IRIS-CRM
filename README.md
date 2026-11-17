@@ -76,7 +76,12 @@ npm test
 
 ## Individual Intervention
 
-На форме **New Individual Intervention** выберите человека в панели и нажмите:
+Кнопки интервеншнов (Registration, Course, Fill job outcome) работают двумя способами:
+
+- **С формы человека (Individual).** Откройте сохранённого человека в IRIS, выберите его же в панели и нажмите кнопку. Панель сама откроет новую Individual Intervention для этого человека (как кнопка «New Individual Intervention» в IRIS) и заполнит её. Если в IRIS открыт другой человек, чем выбран в панели, или человек ещё не сохранён, панель ничего не делает и пишет почему.
+- **С формы New Individual Intervention**, как раньше.
+
+Что ставят кнопки:
 
 - **Registration**: Action «(год) 09 SUPPORTS TO NEW ARRIVALS» (год первой регистрации), LDC Staff Member (вы, если ещё не выбран), Intervention Type «One-to-one meeting», Date of Intervention = First registered, Support Type «Career guidance», Case Notes «Reg», Personal Plan Agreed, «Has there been a change…» = No.
 - **Course**: Action (текущий год), LDC Staff Member, Intervention Type «Labour market related course». Остальное заполняете сами.

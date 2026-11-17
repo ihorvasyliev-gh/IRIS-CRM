@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { duplicateQuery, findIrisDuplicates, irisFormInfo, isStrongMatch, phoneTail } from '../extension/lib.js';
+import { duplicateQuery, findIrisDuplicates, irisFormInfo, isStrongMatch, openIrisIntervention, phoneTail } from '../extension/lib.js';
 
 // An individual's form in IRIS: labelled fields over contact attributes, and the contacts IRIS would return.
 function fakeForm({ labels, rows = [], id = '', formType = 1 }) {
@@ -91,4 +91,60 @@ test('duplicates: quotes escaped, no form, not an individual form, IRIS error', 
   const broken = fakeForm({ labels: INDIVIDUAL }).Xrm;
   broken.WebApi.retrieveMultipleRecords = async () => { throw new Error('Access denied'); };
   assert.deepEqual(await inPage(broken, () => findIrisDuplicates(duplicateQuery(ANNA))), { ok: false, error: 'Access denied' });
+});
+
+// A saved individual's form that can open other forms.
+function individualForm({ first = 'Anna', last = 'Kowalska', id = '{C1}', relationships = [] } = {}) {
+  const opened = [];
+  const values = { 'First Name': first, 'Last Name': last };
+  const controls = Object.entries(values).map(([label, v]) => ({ getLabel: () => label, getAttribute: () => ({ getValue: () => v }) }));
+  const Xrm = {
+    Page: {
+      ui: { controls: { get: () => controls } },
+      data: { entity: { getEntityName: () => 'contact', getId: () => id, getPrimaryAttributeValue: () => `${first} ${last}` } },
+    },
+    Utility: { getGlobalContext: () => ({ getClientUrl: () => 'https://sicap.crm4.dynamics.com' }) },
+    Navigation: { openForm: (options) => { opened.push(options); return new Promise(() => {}); } },
+  };
+  const fetches = [];
+  const fetch = async (url) => { fetches.push(url); return { json: async () => ({ value: relationships.map((e) => ({ ReferencingEntity: e })) }) }; };
+  return { Xrm, opened, fetches, fetch };
+}
+
+async function withFetch(fetch, fn) {
+  const saved = globalThis.fetch;
+  globalThis.fetch = fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = saved;
+  }
+}
+
+test('new intervention from an individual: the known table, linked to the individual', async () => {
+  const form = individualForm();
+  const result = await inPage(form.Xrm, () => openIrisIntervention('sic_intervention', { first: 'anna', last: 'KOWALSKA' }));
+  assert.deepEqual(result, { ok: true, entity: 'sic_intervention', name: 'Anna Kowalska' });
+  assert.deepEqual(form.opened, [{ entityName: 'sic_intervention', createFromEntity: { entityType: 'contact', id: 'C1', name: 'Anna Kowalska' } }]);
+});
+
+test('new intervention: the table looked up among those pointing at individuals', async () => {
+  const form = individualForm({ relationships: ['annotation', 'sic_individualintervention', 'sic_interventionnote', 'sic_individualintervention'] });
+  const result = await withFetch(form.fetch, () => inPage(form.Xrm, () => openIrisIntervention(null, null)));
+  assert.equal(result.entity, 'sic_individualintervention');
+  assert.match(form.fetches[0], /EntityDefinitions\(LogicalName='contact'\)\/OneToManyRelationships/);
+  const unclear = individualForm({ relationships: ['a_intervention', 'b_intervention'] });
+  assert.deepEqual(await withFetch(unclear.fetch, () => inPage(unclear.Xrm, () => openIrisIntervention(null, null))), { ok: false, error: 'unknown-entity' });
+  assert.equal(unclear.opened.length, 0);
+});
+
+test('new intervention: refused for another person, an unsaved form, no form', async () => {
+  const zoe = individualForm({ first: 'Zoë', last: "O'Neill" });
+  assert.equal((await inPage(zoe.Xrm, () => openIrisIntervention('x', { first: 'Zoe', last: 'ONeill' }))).ok, true);
+  const other = individualForm();
+  assert.deepEqual(await inPage(other.Xrm, () => openIrisIntervention('x', { first: 'Olena', last: 'Kowalska' })), { ok: false, error: 'other-person', name: 'Anna Kowalska' });
+  assert.equal(other.opened.length, 0);
+  const unsaved = individualForm({ id: '' });
+  assert.deepEqual(await inPage(unsaved.Xrm, () => openIrisIntervention('x', null)), { ok: false, error: 'unsaved' });
+  assert.deepEqual(await inPage(undefined, () => openIrisIntervention('x', null)), { ok: false, error: 'no-form' });
 });

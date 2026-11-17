@@ -642,3 +642,65 @@ export async function findIrisDuplicates(person) {
     return { ok: false, error: String(e && e.message || e) };
   }
 }
+
+/**
+ * Runs inside the IRIS page (main world), on a saved individual's form. Opens a
+ * new Individual Intervention for that individual, the way the form's own
+ * "New Individual Intervention" does, so IRIS links the two and copies what it
+ * maps. Does not wait for the new form: the panel watches for it.
+ * `interventionEntity` is the table's name when the panel has seen such a form;
+ * otherwise it is looked up among the tables that point at individuals.
+ * `expected` is the person picked in the panel, which must be the one on the form.
+ */
+export async function openIrisIntervention(interventionEntity, expected) {
+  const Xrm = window.Xrm;
+  const page = Xrm && Xrm.Page;
+  if (!page || !page.ui || !page.ui.controls || !page.data || !page.data.entity || !Xrm.Navigation) {
+    return { ok: false, error: 'no-form' };
+  }
+  // Letters without accents, so "Zoë" and "Zoe" are the same name.
+  const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const controls = (page.ui.controls.get() || []).filter((c) =>
+    typeof c.getAttribute === 'function' && typeof c.getLabel === 'function' && c.getAttribute());
+  const valueOf = (label) => {
+    const control = controls.find((c) => norm(c.getLabel()) === norm(label));
+    return control ? control.getAttribute().getValue() : null;
+  };
+  const first = valueOf('First Name');
+  const last = valueOf('Last Name');
+  if (first === null && last === null) return { ok: false, error: 'not-individual' };
+  const onForm = `${first || ''} ${last || ''}`.trim();
+  if (expected && (norm(first) !== norm(expected.first) || norm(last) !== norm(expected.last))) {
+    return { ok: false, error: 'other-person', name: onForm };
+  }
+  const id = String(page.data.entity.getId() || '').replace(/[{}]/g, '');
+  if (!id) return { ok: false, error: 'unsaved' };
+  const parent = page.data.entity.getEntityName();
+
+  let entity = interventionEntity;
+  if (!entity) {
+    try {
+      const ctx = Xrm.Utility.getGlobalContext();
+      const url = `${ctx.getClientUrl()}/api/data/v9.2/EntityDefinitions(LogicalName='${parent}')/OneToManyRelationships?$select=ReferencingEntity`;
+      const response = await fetch(url, { headers: { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } });
+      const names = [...new Set(((await response.json()).value || []).map((r) => r.ReferencingEntity))];
+      const end = names.filter((n) => /intervention$/i.test(n));
+      const found = end.length ? end : names.filter((n) => /intervention/i.test(n));
+      if (found.length === 1) entity = found[0];
+    } catch (e) {
+      // Not allowed to read the tables: the panel asks for an intervention form to be opened once.
+    }
+  }
+  if (!entity) return { ok: false, error: 'unknown-entity' };
+
+  let name = '';
+  try {
+    name = page.data.entity.getPrimaryAttributeValue() || onForm;
+  } catch (e) {
+    name = onForm;
+  }
+  // The promise settles only when the new form is closed, so it is not awaited.
+  Promise.resolve(Xrm.Navigation.openForm({ entityName: entity, createFromEntity: { entityType: parent, id, name } }))
+    .catch((e) => console.error('CRM → IRIS: could not open a new intervention', e));
+  return { ok: true, entity, name };
+}
