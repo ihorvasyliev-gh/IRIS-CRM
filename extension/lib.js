@@ -704,3 +704,16 @@ export async function openIrisIntervention(interventionEntity, expected) {
     .catch((e) => console.error('CRM → IRIS: could not open a new intervention', e));
   return { ok: true, entity, name };
 }
+
+/**
+ * Runs inside any IRIS page (main world). Opens an empty form for a new record
+ * of `entity`, the way IRIS's own "New" does. Does not wait for it: the panel watches.
+ */
+export function openIrisNewForm(entity) {
+  const Xrm = window.Xrm;
+  if (!Xrm || !Xrm.Navigation || typeof Xrm.Navigation.openForm !== 'function') return { ok: false, error: 'no-iris' };
+  // The promise settles only when the new form is closed, so it is not awaited.
+  Promise.resolve(Xrm.Navigation.openForm({ entityName: entity }))
+    .catch((e) => console.error('CRM → IRIS: could not open a new form', e));
+  return { ok: true };
+}

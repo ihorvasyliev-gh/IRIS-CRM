@@ -9,6 +9,7 @@ import {
   irisFormInfo,
   isStrongMatch,
   openIrisIntervention,
+  openIrisNewForm,
   isoDate,
   localDateParts,
   matchesSearch,
@@ -81,6 +82,8 @@ let staffName = '';
 let formInfo = { kind: 'none' };
 // The table IRIS keeps interventions in, learnt from an intervention form or looked up once.
 let interventionEntity = '';
+// The table IRIS keeps individuals in, learnt from an individual's form.
+let individualEntity = '';
 // The IRIS duplicate check per student id: { state: 'checking' | 'done' | 'error', matches, error, confirmed, stopped }.
 const dupChecks = new Map();
 let searchSeq = 0;
@@ -113,9 +116,10 @@ setInterval(checkForUpdate, 10 * 60 * 1000);
 
 async function start() {
   const saved = await chrome.storage.local.get([
-    'supabaseUrl', 'supabaseKey', 'irisLists', 'occupationMemory', 'contractMemory', 'outcomeFilled', 'workingOnly', 'staffName', 'interventionEntity',
+    'supabaseUrl', 'supabaseKey', 'irisLists', 'occupationMemory', 'contractMemory', 'outcomeFilled', 'workingOnly', 'staffName', 'interventionEntity', 'individualEntity',
   ]);
   interventionEntity = saved.interventionEntity || '';
+  individualEntity = saved.individualEntity || '';
   // A connection baked into config.js wins over the one typed in the setup form.
   const preset = self.CRM_CONFIG || {};
   const baked = Boolean(preset.supabaseUrl && preset.supabaseKey);
@@ -679,9 +683,24 @@ async function fillFromPanel(report, buildFields, after, intervention = false) {
   }
 }
 
+let fillBusy = false;
+
 $('fill').addEventListener('click', async () => {
   const id = selectedId;
-  if (!id) return;
+  if (!id || fillBusy) return;
+  fillBusy = true;
+  try {
+    await fillNewIndividual(id);
+  } finally {
+    fillBusy = false;
+  }
+});
+
+// On a new individual's form fills it; on any other IRIS page opens one first.
+// Either way it looks for the person in IRIS before filling anything.
+async function fillNewIndividual(id) {
+  if (!(await ensureNewIndividualForm($('fill-report')))) return;
+  if (id !== selectedId) return;
   const prior = dupChecks.get(id);
   if (!(prior && prior.confirmed)) {
     // Look in IRIS right before creating anyone; stop when the person seems to be there already.
@@ -695,7 +714,41 @@ $('fill').addEventListener('click', async () => {
     }
   }
   fillIndividual();
-});
+}
+
+async function ensureNewIndividualForm(report) {
+  const info = await readFormInfo();
+  if (info.kind === 'individual' && info.isNew) return true;
+  if (!individualEntity) {
+    say(report, 'Open any individual\'s form in IRIS once (anyone will do), so the panel learns where IRIS keeps individuals. After that this button works from any IRIS page.', 'error');
+    return false;
+  }
+  say(report, 'Opening a new Individual form in IRIS…');
+  let opened;
+  try {
+    opened = await runInIris(openIrisNewForm, [individualEntity]);
+  } catch (e) {
+    opened = null;
+  }
+  if (!opened || !opened.ok) {
+    say(report, 'Open IRIS in this tab first, then press the button again.', 'error');
+    return false;
+  }
+  for (let waited = 0; waited < 20000; waited += 500) {
+    await pause(500);
+    const now = await readFormInfo();
+    if (now.kind === 'individual' && now.isNew) {
+      // Let IRIS finish loading the form and its Auto Address box.
+      await pause(1500);
+      report.replaceChildren();
+      formInfo = now;
+      renderFormInfo();
+      return true;
+    }
+  }
+  say(report, 'The new Individual form did not open. Press New in IRIS, then press the button again.', 'error');
+  return false;
+}
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -771,6 +824,10 @@ async function refreshFormInfo() {
     interventionEntity = info.entity;
     chrome.storage.local.set({ interventionEntity });
   }
+  if (info.kind === 'individual' && info.entity && info.entity !== individualEntity) {
+    individualEntity = info.entity;
+    chrome.storage.local.set({ individualEntity });
+  }
   const changed = info.kind !== formInfo.kind || info.isNew !== formInfo.isNew;
   formInfo = info;
   if (changed) renderFormInfo();
@@ -791,7 +848,9 @@ function renderFormInfo() {
   }
   for (const button of document.querySelectorAll('button[data-form]')) {
     // The intervention buttons work from an individual's form too: they open a new intervention first.
-    const fits = button.dataset.form === formInfo.kind || (button.dataset.form === 'intervention' && formInfo.kind === 'individual');
+    // Fill IRIS form works from any IRIS page: it opens a new individual first.
+    const fits = button.dataset.form === formInfo.kind || button.dataset.form === 'individual'
+      || (button.dataset.form === 'intervention' && formInfo.kind === 'individual');
     button.classList.toggle('other-form', known && !fits);
   }
   renderDuplicates();
