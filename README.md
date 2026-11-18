@@ -84,6 +84,8 @@ npm test
 Что ставят кнопки:
 
 - **Registration**: Action «(год) 09 SUPPORTS TO NEW ARRIVALS» (год первой регистрации), LDC Staff Member (вы, если ещё не выбран), Intervention Type «One-to-one meeting», Date of Intervention = First registered, Support Type «Career guidance», Case Notes «Reg», Personal Plan Agreed, «Has there been a change…» = No.
+  Перед заполнением Registration панель смотрит, нет ли у этого человека в IRIS уже интервенции «One-to-one meeting» с Case Notes, начинающимися на «Reg». Если есть, ничего не заполняет, даёт ссылку на неё и кнопку **fill anyway**. Интервенции, внесённые вручную с другим текстом в Case Notes, она не распознает.
+- Если Action нужного года в IRIS нет (или он закрыт), ставится самый новый, и в отчёте это выделено: «filled with another year, check it».
 - **Course**: Action (текущий год), LDC Staff Member, Intervention Type «Labour market related course». Остальное заполняете сами.
 
 ## Job outcome

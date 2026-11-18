@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { duplicateQuery, findIrisDuplicates, irisFormInfo, isStrongMatch, openIrisIntervention, phoneTail } from '../extension/lib.js';
+import { duplicateQuery, findIrisDuplicates, findIrisRegistrations, irisFormInfo, isStrongMatch, openIrisIntervention, phoneTail } from '../extension/lib.js';
 
 // An individual's form in IRIS: labelled fields over contact attributes, and the contacts IRIS would return.
 function fakeForm({ labels, rows = [], id = '', formType = 1 }) {
@@ -147,4 +147,48 @@ test('new intervention: refused for another person, an unsaved form, no form', a
   const unsaved = individualForm({ id: '' });
   assert.deepEqual(await inPage(unsaved.Xrm, () => openIrisIntervention('x', null)), { ok: false, error: 'unsaved' });
   assert.deepEqual(await inPage(undefined, () => openIrisIntervention('x', null)), { ok: false, error: 'no-form' });
+});
+
+// A new intervention form opened from an individual, and the interventions IRIS already has.
+function registrationForm({ individual = { id: '{C1}', name: 'Anna Kowalska', entityType: 'contact' }, rows = [] } = {}) {
+  const attr = (name, value, options) => ({ getName: () => name, getValue: () => value, getOptions: () => options || [] });
+  const controls = [
+    ['Action', attr('sic_actionid', [{ id: 'a', name: '(2026) 09', entityType: 'sic_action' }])],
+    ['Individual', attr('sic_individualid', individual ? [individual] : null)],
+    ['Intervention Type', attr('sic_type', null, [{ value: 7, text: 'One-to-one meeting' }, { value: 8, text: 'Labour market related course' }])],
+    ['Date of Intervention', attr('sic_date', null)],
+    ['Case Notes', attr('sic_notes', null)],
+  ].map(([label, a]) => ({ getLabel: () => label, getAttribute: () => a }));
+  const queries = [];
+  const Xrm = {
+    Page: { ui: { controls: { get: () => controls } }, data: { entity: { getEntityName: () => 'sic_intervention', getId: () => '' } } },
+    Utility: {
+      getEntityMetadata: async () => ({ PrimaryIdAttribute: 'sic_interventionid', PrimaryNameAttribute: 'sic_name' }),
+      getGlobalContext: () => ({ getClientUrl: () => 'https://sicap.crm4.dynamics.com' }),
+    },
+    WebApi: { retrieveMultipleRecords: async (entity, options) => { queries.push(`${entity}${options}`); return { entities: rows }; } },
+  };
+  return { Xrm, queries };
+}
+
+test('registrations: an earlier "Reg" one-to-one of the same individual is found', async () => {
+  const rows = [
+    { sic_interventionid: 'i1', sic_notes: 'Reg', sic_date: '2026-03-12' },
+    { sic_interventionid: 'i2', sic_notes: 'Outcome: working', sic_date: '2026-06-01' },
+    { sic_interventionid: 'i3', sic_notes: ' registration meeting', sic_date: '2026-04-01T23:00:00Z' },
+  ];
+  const { Xrm, queries } = registrationForm({ rows });
+  const result = await inPage(Xrm, () => findIrisRegistrations('contact'));
+  assert.equal(result.ok, true);
+  assert.equal(result.name, 'Anna Kowalska');
+  assert.equal(queries[0], 'sic_intervention?$select=sic_interventionid,sic_type,sic_notes,sic_date&$filter=_sic_individualid_value eq C1 and sic_type eq 7&$top=20');
+  assert.deepEqual(result.matches.map((m) => m.notes), ['Reg', 'registration meeting']);
+  assert.equal(result.matches[0].date, '2026-03-12');
+  assert.match(result.matches[0].url, /etn=sic_intervention&id=i1$/);
+});
+
+test('registrations: no individual on the form, unknown table, not an intervention', async () => {
+  assert.deepEqual(await inPage(registrationForm({ individual: null }).Xrm, () => findIrisRegistrations('contact')), { ok: false, error: 'no-individual' });
+  assert.deepEqual(await inPage(registrationForm().Xrm, () => findIrisRegistrations(null)), { ok: false, error: 'no-individual' });
+  assert.deepEqual(await inPage(fakeForm({ labels: INDIVIDUAL }).Xrm, () => findIrisRegistrations('contact')), { ok: false, error: 'not-intervention' });
 });

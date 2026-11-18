@@ -3,6 +3,7 @@ import {
   buildSearchFilter,
   duplicateQuery,
   findIrisDuplicates,
+  findIrisRegistrations,
   fillIrisForm,
   formatDate,
   interventionFields,
@@ -659,13 +660,15 @@ function registeredText(id) {
 // Fills the open IRIS form with `buildFields(student, firstRegisteredAt)`.
 // `after` may add to the result, e.g. the Auto Address step.
 // With `intervention`, an individual's form first gets a new intervention opened from it.
-async function fillFromPanel(report, buildFields, after, intervention = false) {
+// `precheck(student, report)` may stop the fill once the right form is open.
+async function fillFromPanel(report, buildFields, after, intervention = false, precheck = null) {
   const s = students.find((x) => x.id === selectedId);
   if (!s) return;
   const buttons = document.querySelectorAll('#selected button');
   buttons.forEach((b) => { b.disabled = true; });
   try {
     if (intervention && !(await ensureInterventionForm(s, report))) return;
+    if (precheck && !(await precheck(s, report))) return;
     if (!firstRegistered.has(s.id) || firstRegistered.get(s.id) === undefined) await loadFirstRegistration(s.id);
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const [{ result }] = await chrome.scripting.executeScript({
@@ -689,10 +692,14 @@ $('fill').addEventListener('click', async () => {
   const id = selectedId;
   if (!id || fillBusy) return;
   fillBusy = true;
+  // Nothing else may start while a new form opens: two fills would mix.
+  const buttons = document.querySelectorAll('#selected button');
+  buttons.forEach((b) => { b.disabled = true; });
   try {
     await fillNewIndividual(id);
   } finally {
     fillBusy = false;
+    buttons.forEach((b) => { b.disabled = false; });
   }
 });
 
@@ -953,7 +960,47 @@ function renderDuplicates() {
 }
 
 $('int-registration').addEventListener('click', () =>
-  fillFromPanel($('int-report'), (_s, at) => interventionFields('registration', at, new Date(), staffName), null, true));
+  fillFromPanel($('int-report'), (_s, at) => interventionFields('registration', at, new Date(), staffName), null, true, checkRegistration));
+
+// People for whom "fill anyway" was pressed after a registration was found in IRIS.
+const registrationConfirmed = new Set();
+
+// Stops a second registration: looks for the individual's earlier one-to-one
+// meetings noted "Reg". When IRIS can't be asked, the fill goes ahead as before.
+async function checkRegistration(s, report) {
+  // "fill anyway" lets one fill through; the next registration is checked again.
+  if (registrationConfirmed.delete(s.id)) return true;
+  let found;
+  try {
+    found = await runInIris(findIrisRegistrations, [individualEntity || null]);
+  } catch (e) {
+    found = null;
+  }
+  if (!found || !found.ok || !found.matches.length) return true;
+  const li = document.createElement('li');
+  li.className = 'error';
+  const dates = found.matches.map((m) => formatDate(m.date) || 'no date');
+  li.append(`${found.name || 'This person'} already has ${found.matches.length > 1 ? 'registrations' : 'a registration'} in IRIS (${dates.join(', ')}). Nothing was filled: close this form without saving. `);
+  found.matches.forEach((m, i) => {
+    const link = document.createElement('a');
+    link.href = m.url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = found.matches.length > 1 ? `Open ${i + 1}` : 'Open it';
+    li.append(link, ' · ');
+  });
+  const anyway = document.createElement('button');
+  anyway.type = 'button';
+  anyway.className = 'link';
+  anyway.textContent = 'fill anyway';
+  anyway.addEventListener('click', () => {
+    registrationConfirmed.add(s.id);
+    $('int-registration').click();
+  });
+  li.append(anyway);
+  report.replaceChildren(li);
+  return false;
+}
 
 $('int-course').addEventListener('click', () =>
   fillFromPanel($('int-report'), (_s, at) => interventionFields('course', at, new Date(), staffName), null, true));
@@ -998,6 +1045,7 @@ function renderReport(list, result, emptyText = {}) {
     kept: 'already filled, left as is',
     choose: 'more than one option, choose by hand',
     'no-match': 'no such option in IRIS, choose by hand',
+    'other-year': 'filled with another year, check it',
     cleared: 'IRIS cleared the value, fill it by hand',
   };
   const lines = result.results.map((r) => {

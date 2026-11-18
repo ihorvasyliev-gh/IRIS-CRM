@@ -306,7 +306,10 @@ export async function fillIrisForm(fields, readOnly = false) {
     if (!rows.length) return null;
     const byYear = preferYear && rows.find((r) => String(r[m.name]).includes(`(${preferYear})`));
     const newest = rows.slice().sort((a, b) => String(b[m.name]).localeCompare(String(a[m.name])))[0];
-    return asLookup(m, byYear || newest);
+    const lookup = asLookup(m, byYear || newest);
+    // No record for the wanted year: the newest is put, and the report says so.
+    if (preferYear && !byYear) lookup.otherYear = { year: preferYear, name: newest[m.name] };
+    return lookup;
   };
 
   const userName = () => {
@@ -384,6 +387,14 @@ export async function fillIrisForm(fields, readOnly = false) {
         }
         if (!value) {
           results.push({ key: field.key, status: 'no-match', message: wanted.name });
+          continue;
+        }
+        if (value.otherYear) {
+          const { year, name } = value.otherYear;
+          delete value.otherYear;
+          attr.setValue(value);
+          if (typeof attr.fireOnChange === 'function') attr.fireOnChange();
+          results.push({ key: field.key, status: 'other-year', message: `IRIS has none for ${year}, “${name}” was put` });
           continue;
         }
       } else if (field.type === 'option') {
@@ -716,4 +727,71 @@ export function openIrisNewForm(entity) {
   Promise.resolve(Xrm.Navigation.openForm({ entityName: entity }))
     .catch((e) => console.error('CRM → IRIS: could not open a new form', e));
   return { ok: true };
+}
+
+/**
+ * Runs inside the IRIS page (main world), on an intervention form whose
+ * individual is already set (as it is when opened from the individual's form).
+ * Finds that individual's other interventions that look like a registration:
+ * Intervention Type "One-to-one meeting" and Case Notes starting with "Reg".
+ * Answers { ok: false, error: 'no-individual' } when the form has no individual yet.
+ */
+export async function findIrisRegistrations(individualEntity) {
+  const Xrm = window.Xrm;
+  const page = Xrm && Xrm.Page;
+  if (!page || !page.ui || !page.ui.controls || !page.data || !page.data.entity || !Xrm.WebApi || !Xrm.Utility) {
+    return { ok: false, error: 'no-form' };
+  }
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const controls = (page.ui.controls.get() || []).filter((c) =>
+    typeof c.getAttribute === 'function' && typeof c.getLabel === 'function' && c.getAttribute());
+  const attrOf = (label) => {
+    const control = controls.find((c) => norm(c.getLabel()) === norm(label));
+    return control ? control.getAttribute() : null;
+  };
+  const type = attrOf('Intervention Type');
+  const notes = attrOf('Case Notes');
+  const date = attrOf('Date of Intervention');
+  if (!type || !notes) return { ok: false, error: 'not-intervention' };
+  const oneToOne = (type.getOptions() || []).find((o) => norm(o.text) === norm('One-to-one meeting'));
+  if (!oneToOne) return { ok: false, error: 'no-one-to-one' };
+
+  // The lookup that holds the individual: the one pointing at the individuals' table.
+  if (!individualEntity) return { ok: false, error: 'no-individual' };
+  const individual = controls.map((c) => c.getAttribute()).find((a) => {
+    const v = typeof a.getValue === 'function' ? a.getValue() : null;
+    return Array.isArray(v) && v[0] && v[0].entityType === individualEntity;
+  });
+  const who = individual && individual.getValue()[0];
+  if (!who || !who.id) return { ok: false, error: 'no-individual' };
+  try {
+    const entity = page.data.entity.getEntityName();
+    const meta = await Xrm.Utility.getEntityMetadata(entity, []);
+    const id = String(who.id).replace(/[{}]/g, '');
+    const columns = [meta.PrimaryIdAttribute, type.getName(), notes.getName(), date ? date.getName() : null].filter(Boolean);
+    const filter = `_${individual.getName()}_value eq ${id} and ${type.getName()} eq ${oneToOne.value}`;
+    const found = await Xrm.WebApi.retrieveMultipleRecords(entity, `?$select=${columns.join(',')}&$filter=${filter}&$top=20`);
+    const currentId = String(page.data.entity.getId() || '').replace(/[{}]/g, '').toLowerCase();
+    const day = (v) => {
+      if (!v) return '';
+      const s = String(v);
+      if (!s.includes('T')) return s.slice(0, 10);
+      const d = new Date(s);
+      return Number.isNaN(d.getTime()) ? '' : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    const ctx = Xrm.Utility.getGlobalContext();
+    const base = ctx && ctx.getClientUrl ? ctx.getClientUrl() : location.origin;
+    const appId = new URLSearchParams(location.search).get('appid');
+    const matches = found.entities
+      .filter((r) => String(r[meta.PrimaryIdAttribute]).toLowerCase() !== currentId)
+      .filter((r) => /^\s*reg/i.test(String(r[notes.getName()] || '')))
+      .map((r) => ({
+        date: date ? day(r[date.getName()]) : '',
+        notes: String(r[notes.getName()] || '').trim().slice(0, 60),
+        url: `${base}/main.aspx?${appId ? `appid=${encodeURIComponent(appId)}&` : ''}pagetype=entityrecord&etn=${entity}&id=${r[meta.PrimaryIdAttribute]}`,
+      }));
+    return { ok: true, name: who.name || '', matches };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e) };
+  }
 }

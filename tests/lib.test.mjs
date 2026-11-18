@@ -558,3 +558,15 @@ test('search over people already loaded follows the CRM search', () => {
   assert.equal(matchesSearch(anna, '999'), false);
   assert.equal(matchesSearch({ first_name: null }, 'x'), false);
 });
+
+test('fill: no Action for the wanted year puts the newest and says so', async () => {
+  const { attrs, Xrm } = fakeInterventionForm(TABLES);
+  await withPage({ Xrm }, async () => {
+    const result = await fillIrisForm(interventionFields('registration', '2024-03-12T09:00:00'));
+    const action = result.results.find((r) => r.key === 'action');
+    assert.equal(action.status, 'other-year');
+    assert.equal(action.message, 'IRIS has none for 2024, “(2026) 09 SUPPORTS TO NEW ARRIVALS” was put');
+    assert.deepEqual(attrs.Action.value, [{ id: 'a26', name: '(2026) 09 SUPPORTS TO NEW ARRIVALS', entityType: 'sic_action' }]);
+    assert.equal('otherYear' in attrs.Action.value, false);
+  });
+});

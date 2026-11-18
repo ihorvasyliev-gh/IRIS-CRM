@@ -132,7 +132,7 @@ h3 { font-size: 13px; margin: 18px 0 8px; }
 }
 
 .filled { color: var(--ok); }
-.empty, .not-found, .no-match, .choose, .cleared { color: var(--warn); }
+.empty, .not-found, .no-match, .choose, .cleared, .other-year { color: var(--warn); }
 li.error { color: var(--bad); }
 
 header button.link { margin-top: 0; }
@@ -257,3 +257,5 @@ button.other-form {
 .dup li { margin-bottom: 4px; }
 .dup a { color: var(--accent); }
 .dup button.link { margin-top: 0; }
+#int-report a { color: var(--accent); }
+#int-report button.link { margin-top: 0; }
