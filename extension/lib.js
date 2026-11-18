@@ -86,8 +86,8 @@ export const DEFAULT_CAB_LOT = 'Cork City (17-1)';
  * `names` are logical-name guesses tried when no label matches.
  * `firstRegisteredAt` is the student's earliest course registration in the CRM.
  */
-export function toIrisFields(student, firstRegisteredAt) {
-  return [
+export function toIrisFields(student, firstRegisteredAt, staffName = '') {
+  const fields = [
     { key: 'first_name', labels: ['First Name'], names: ['firstname'], type: 'text', value: (student.first_name || '').trim() },
     { key: 'last_name', labels: ['Last Name'], names: ['lastname'], type: 'text', value: (student.last_name || '').trim() },
     { key: 'mobile', labels: ['Mobile No.', 'Mobile No', 'Mobile Phone'], names: ['mobilephone'], type: 'text', value: toIrishLocalPhone(student.phone) },
@@ -97,6 +97,9 @@ export function toIrisFields(student, firstRegisteredAt) {
     { key: 'registration', labels: ['Date of Registration Meeting'], names: [], type: 'date', value: localDateParts(firstRegisteredAt) },
     { key: 'cab', labels: ['CAB/Lot', 'CAB / Lot'], names: [], type: 'only-lookup', value: DEFAULT_CAB_LOT },
   ];
+  // IRIS already puts the signed-in user on a new individual, so only a name from the settings changes it.
+  if (String(staffName || '').trim()) fields.push(staffField(staffName));
+  return fields;
 }
 
 /** The Action both intervention buttons pick, for the year in question. */
@@ -303,7 +306,10 @@ export async function fillIrisForm(fields, readOnly = false) {
     if (!rows.length) return null;
     const byYear = preferYear && rows.find((r) => String(r[m.name]).includes(`(${preferYear})`));
     const newest = rows.slice().sort((a, b) => String(b[m.name]).localeCompare(String(a[m.name])))[0];
-    return asLookup(m, byYear || newest);
+    const lookup = asLookup(m, byYear || newest);
+    // No record for the wanted year: the newest is put, and the report says so.
+    if (preferYear && !byYear) lookup.otherYear = { year: preferYear, name: newest[m.name] };
+    return lookup;
   };
 
   const userName = () => {
@@ -381,6 +387,14 @@ export async function fillIrisForm(fields, readOnly = false) {
         }
         if (!value) {
           results.push({ key: field.key, status: 'no-match', message: wanted.name });
+          continue;
+        }
+        if (value.otherYear) {
+          const { year, name } = value.otherYear;
+          delete value.otherYear;
+          attr.setValue(value);
+          if (typeof attr.fireOnChange === 'function') attr.fireOnChange();
+          results.push({ key: field.key, status: 'other-year', message: `IRIS has none for ${year}, “${name}” was put` });
           continue;
         }
       } else if (field.type === 'option') {
@@ -509,4 +523,275 @@ export async function typeAutoAddress(query, waitMs = 6000) {
     return 'picked';
   }
   return 'typed';
+}
+
+/** The last 7 digits of a phone number, which IRIS and the CRM write in different ways. */
+export function phoneTail(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 7 ? digits.slice(-7) : '';
+}
+
+/** Who to look for in IRIS before a new individual is filled in. */
+export function duplicateQuery(student) {
+  return {
+    first: (student.first_name || '').trim(),
+    last: (student.last_name || '').trim(),
+    email: (student.email || '').trim(),
+    phoneTail: phoneTail(student.phone),
+    dob: parseIsoDate(student.dob) ? String(student.dob).slice(0, 10) : '',
+  };
+}
+
+/**
+ * A match deserves a stop before filling when it shares the email, the phone,
+ * or the name together with the date of birth. A namesake alone is only shown.
+ */
+export function isStrongMatch(match) {
+  const why = match.why || [];
+  return why.includes('email') || why.includes('phone') || (why.includes('name') && why.includes('date of birth'));
+}
+
+/**
+ * Runs inside the IRIS page (main world). Says which kind of form is open:
+ * 'individual' (has First Name and Last Name), 'intervention' (has Intervention
+ * Type), 'other' for any other form, 'none' when no form is open.
+ */
+export function irisFormInfo() {
+  const Xrm = window.Xrm;
+  const page = Xrm && Xrm.Page;
+  if (!page || !page.ui || !page.ui.controls || !page.data || !page.data.entity) return { kind: 'none' };
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const labels = new Set((page.ui.controls.get() || [])
+    .filter((c) => typeof c.getLabel === 'function')
+    .map((c) => norm(c.getLabel())));
+  let kind = 'other';
+  if (labels.has('interventiontype')) kind = 'intervention';
+  else if (labels.has('firstname') && labels.has('lastname')) kind = 'individual';
+  const isNew = typeof page.ui.getFormType === 'function' && page.ui.getFormType() === 1;
+  return { kind, isNew, entity: page.data.entity.getEntityName() };
+}
+
+/**
+ * Runs inside the IRIS page (main world), on an individual's form. Looks for
+ * other individuals with the same email, the same phone (its last 7 digits) or
+ * the same first and last name. The fields are found by their labels on the
+ * open form, so their names never have to be guessed.
+ */
+export async function findIrisDuplicates(person) {
+  const Xrm = window.Xrm;
+  const page = Xrm && Xrm.Page;
+  if (!page || !page.ui || !page.ui.controls || !page.data || !page.data.entity || !Xrm.WebApi || !Xrm.Utility) {
+    return { ok: false, error: 'no-form' };
+  }
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const controls = (page.ui.controls.get() || []).filter((c) =>
+    typeof c.getAttribute === 'function' && typeof c.getLabel === 'function' && c.getAttribute());
+  const attrName = (labels) => {
+    const wanted = labels.map(norm);
+    const control = controls.find((c) => wanted.includes(norm(c.getLabel())));
+    return control ? control.getAttribute().getName() : null;
+  };
+  const f = {
+    first: attrName(['First Name']),
+    last: attrName(['Last Name']),
+    email: attrName(['Email']),
+    phone: attrName(['Mobile No.', 'Mobile No', 'Mobile Phone']),
+    dob: attrName(['Date of Birth']),
+  };
+  if (!f.first || !f.last) return { ok: false, error: 'not-individual' };
+  try {
+    const entity = page.data.entity.getEntityName();
+    const meta = await Xrm.Utility.getEntityMetadata(entity, []);
+    const odata = (text) => `'${String(text).replace(/'/g, "''")}'`;
+    const ors = [];
+    if (person.email && f.email) ors.push(`${f.email} eq ${odata(person.email)}`);
+    if (person.phoneTail && f.phone) {
+      // "0871234567" and "087 123 4567" both end in 1234567 / 123 4567.
+      ors.push(`contains(${f.phone},${odata(person.phoneTail)})`);
+      ors.push(`contains(${f.phone},${odata(`${person.phoneTail.slice(0, 3)} ${person.phoneTail.slice(3)}`)})`);
+    }
+    if (person.first && person.last) ors.push(`(${f.first} eq ${odata(person.first)} and ${f.last} eq ${odata(person.last)})`);
+    if (!ors.length) return { ok: true, matches: [] };
+    const columns = [...new Set([meta.PrimaryIdAttribute, meta.PrimaryNameAttribute, ...Object.values(f).filter(Boolean)])];
+    const found = await Xrm.WebApi.retrieveMultipleRecords(entity, `?$select=${columns.join(',')}&$filter=${ors.join(' or ')}&$top=10`);
+
+    const currentId = String(page.data.entity.getId() || '').replace(/[{}]/g, '').toLowerCase();
+    const digits = (s) => String(s || '').replace(/\D/g, '');
+    // A date-only field comes back as "1990-04-23"; a date-time one as a moment, read in local time.
+    const day = (v) => {
+      if (!v) return '';
+      const s = String(v);
+      if (!s.includes('T')) return s.slice(0, 10);
+      const d = new Date(s);
+      return Number.isNaN(d.getTime()) ? '' : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    const ctx = Xrm.Utility.getGlobalContext();
+    const base = ctx && ctx.getClientUrl ? ctx.getClientUrl() : location.origin;
+    const appId = new URLSearchParams(location.search).get('appid');
+    const matches = found.entities
+      .filter((r) => String(r[meta.PrimaryIdAttribute]).toLowerCase() !== currentId)
+      .map((r) => {
+        const dob = f.dob ? day(r[f.dob]) : '';
+        const why = [];
+        if (person.email && f.email && String(r[f.email] || '').trim().toLowerCase() === person.email.toLowerCase()) why.push('email');
+        if (person.phoneTail && f.phone && digits(r[f.phone]).endsWith(person.phoneTail)) why.push('phone');
+        if (norm(r[f.first]) === norm(person.first) && norm(r[f.last]) === norm(person.last)) why.push('name');
+        if (person.dob && dob === person.dob) why.push('date of birth');
+        const id = r[meta.PrimaryIdAttribute];
+        return {
+          name: r[meta.PrimaryNameAttribute] || `${r[f.first] || ''} ${r[f.last] || ''}`.trim(),
+          email: f.email ? r[f.email] || '' : '',
+          phone: f.phone ? r[f.phone] || '' : '',
+          dob,
+          why,
+          url: `${base}/main.aspx?${appId ? `appid=${encodeURIComponent(appId)}&` : ''}pagetype=entityrecord&etn=${entity}&id=${id}`,
+        };
+      })
+      .filter((m) => m.why.some((w) => w !== 'date of birth'));
+    return { ok: true, matches };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e) };
+  }
+}
+
+/**
+ * Runs inside the IRIS page (main world), on a saved individual's form. Opens a
+ * new Individual Intervention for that individual, the way the form's own
+ * "New Individual Intervention" does, so IRIS links the two and copies what it
+ * maps. Does not wait for the new form: the panel watches for it.
+ * `interventionEntity` is the table's name when the panel has seen such a form;
+ * otherwise it is looked up among the tables that point at individuals.
+ * `expected` is the person picked in the panel, which must be the one on the form.
+ */
+export async function openIrisIntervention(interventionEntity, expected) {
+  const Xrm = window.Xrm;
+  const page = Xrm && Xrm.Page;
+  if (!page || !page.ui || !page.ui.controls || !page.data || !page.data.entity || !Xrm.Navigation) {
+    return { ok: false, error: 'no-form' };
+  }
+  // Letters without accents, so "Zoë" and "Zoe" are the same name.
+  const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const controls = (page.ui.controls.get() || []).filter((c) =>
+    typeof c.getAttribute === 'function' && typeof c.getLabel === 'function' && c.getAttribute());
+  const valueOf = (label) => {
+    const control = controls.find((c) => norm(c.getLabel()) === norm(label));
+    return control ? control.getAttribute().getValue() : null;
+  };
+  const first = valueOf('First Name');
+  const last = valueOf('Last Name');
+  if (first === null && last === null) return { ok: false, error: 'not-individual' };
+  const onForm = `${first || ''} ${last || ''}`.trim();
+  if (expected && (norm(first) !== norm(expected.first) || norm(last) !== norm(expected.last))) {
+    return { ok: false, error: 'other-person', name: onForm };
+  }
+  const id = String(page.data.entity.getId() || '').replace(/[{}]/g, '');
+  if (!id) return { ok: false, error: 'unsaved' };
+  const parent = page.data.entity.getEntityName();
+
+  let entity = interventionEntity;
+  if (!entity) {
+    try {
+      const ctx = Xrm.Utility.getGlobalContext();
+      const url = `${ctx.getClientUrl()}/api/data/v9.2/EntityDefinitions(LogicalName='${parent}')/OneToManyRelationships?$select=ReferencingEntity`;
+      const response = await fetch(url, { headers: { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } });
+      const names = [...new Set(((await response.json()).value || []).map((r) => r.ReferencingEntity))];
+      const end = names.filter((n) => /intervention$/i.test(n));
+      const found = end.length ? end : names.filter((n) => /intervention/i.test(n));
+      if (found.length === 1) entity = found[0];
+    } catch (e) {
+      // Not allowed to read the tables: the panel asks for an intervention form to be opened once.
+    }
+  }
+  if (!entity) return { ok: false, error: 'unknown-entity' };
+
+  let name = '';
+  try {
+    name = page.data.entity.getPrimaryAttributeValue() || onForm;
+  } catch (e) {
+    name = onForm;
+  }
+  // The promise settles only when the new form is closed, so it is not awaited.
+  Promise.resolve(Xrm.Navigation.openForm({ entityName: entity, createFromEntity: { entityType: parent, id, name } }))
+    .catch((e) => console.error('CRM → IRIS: could not open a new intervention', e));
+  return { ok: true, entity, name };
+}
+
+/**
+ * Runs inside any IRIS page (main world). Opens an empty form for a new record
+ * of `entity`, the way IRIS's own "New" does. Does not wait for it: the panel watches.
+ */
+export function openIrisNewForm(entity) {
+  const Xrm = window.Xrm;
+  if (!Xrm || !Xrm.Navigation || typeof Xrm.Navigation.openForm !== 'function') return { ok: false, error: 'no-iris' };
+  // The promise settles only when the new form is closed, so it is not awaited.
+  Promise.resolve(Xrm.Navigation.openForm({ entityName: entity }))
+    .catch((e) => console.error('CRM → IRIS: could not open a new form', e));
+  return { ok: true };
+}
+
+/**
+ * Runs inside the IRIS page (main world), on an intervention form whose
+ * individual is already set (as it is when opened from the individual's form).
+ * Finds that individual's other interventions that look like a registration:
+ * Intervention Type "One-to-one meeting" and Case Notes starting with "Reg".
+ * Answers { ok: false, error: 'no-individual' } when the form has no individual yet.
+ */
+export async function findIrisRegistrations(individualEntity) {
+  const Xrm = window.Xrm;
+  const page = Xrm && Xrm.Page;
+  if (!page || !page.ui || !page.ui.controls || !page.data || !page.data.entity || !Xrm.WebApi || !Xrm.Utility) {
+    return { ok: false, error: 'no-form' };
+  }
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const controls = (page.ui.controls.get() || []).filter((c) =>
+    typeof c.getAttribute === 'function' && typeof c.getLabel === 'function' && c.getAttribute());
+  const attrOf = (label) => {
+    const control = controls.find((c) => norm(c.getLabel()) === norm(label));
+    return control ? control.getAttribute() : null;
+  };
+  const type = attrOf('Intervention Type');
+  const notes = attrOf('Case Notes');
+  const date = attrOf('Date of Intervention');
+  if (!type || !notes) return { ok: false, error: 'not-intervention' };
+  const oneToOne = (type.getOptions() || []).find((o) => norm(o.text) === norm('One-to-one meeting'));
+  if (!oneToOne) return { ok: false, error: 'no-one-to-one' };
+
+  // The lookup that holds the individual: the one pointing at the individuals' table.
+  if (!individualEntity) return { ok: false, error: 'no-individual' };
+  const individual = controls.map((c) => c.getAttribute()).find((a) => {
+    const v = typeof a.getValue === 'function' ? a.getValue() : null;
+    return Array.isArray(v) && v[0] && v[0].entityType === individualEntity;
+  });
+  const who = individual && individual.getValue()[0];
+  if (!who || !who.id) return { ok: false, error: 'no-individual' };
+  try {
+    const entity = page.data.entity.getEntityName();
+    const meta = await Xrm.Utility.getEntityMetadata(entity, []);
+    const id = String(who.id).replace(/[{}]/g, '');
+    const columns = [meta.PrimaryIdAttribute, type.getName(), notes.getName(), date ? date.getName() : null].filter(Boolean);
+    const filter = `_${individual.getName()}_value eq ${id} and ${type.getName()} eq ${oneToOne.value}`;
+    const found = await Xrm.WebApi.retrieveMultipleRecords(entity, `?$select=${columns.join(',')}&$filter=${filter}&$top=20`);
+    const currentId = String(page.data.entity.getId() || '').replace(/[{}]/g, '').toLowerCase();
+    const day = (v) => {
+      if (!v) return '';
+      const s = String(v);
+      if (!s.includes('T')) return s.slice(0, 10);
+      const d = new Date(s);
+      return Number.isNaN(d.getTime()) ? '' : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    const ctx = Xrm.Utility.getGlobalContext();
+    const base = ctx && ctx.getClientUrl ? ctx.getClientUrl() : location.origin;
+    const appId = new URLSearchParams(location.search).get('appid');
+    const matches = found.entities
+      .filter((r) => String(r[meta.PrimaryIdAttribute]).toLowerCase() !== currentId)
+      .filter((r) => /^\s*reg/i.test(String(r[notes.getName()] || '')))
+      .map((r) => ({
+        date: date ? day(r[date.getName()]) : '',
+        notes: String(r[notes.getName()] || '').trim().slice(0, 60),
+        url: `${base}/main.aspx?${appId ? `appid=${encodeURIComponent(appId)}&` : ''}pagetype=entityrecord&etn=${entity}&id=${r[meta.PrimaryIdAttribute]}`,
+      }));
+    return { ok: true, name: who.name || '', matches };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e) };
+  }
 }

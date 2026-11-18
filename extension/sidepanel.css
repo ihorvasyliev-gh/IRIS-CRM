@@ -132,7 +132,7 @@ h3 { font-size: 13px; margin: 18px 0 8px; }
 }
 
 .filled { color: var(--ok); }
-.empty, .not-found, .no-match, .choose, .cleared { color: var(--warn); }
+.empty, .not-found, .no-match, .choose, .cleared, .other-year { color: var(--warn); }
 li.error { color: var(--bad); }
 
 header button.link { margin-top: 0; }
@@ -221,3 +221,41 @@ select:disabled { color: var(--muted); }
 input.bad { border-color: var(--bad); }
 
 #outcome-done button.link { margin-top: 0; }
+
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+}
+.update-banner[hidden] { display: none; }
+.update-banner button { margin: 0; }
+
+/* Which IRIS form is open in the tab, and the buttons that belong to it. */
+.iris-form { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+.iris-form strong { color: var(--fg); }
+.iris-form::before { content: "●"; margin-right: 6px; color: var(--muted); }
+.iris-form.on::before { color: var(--ok); }
+button.other-form {
+  background: none;
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* Possible duplicates found in IRIS. */
+.dup { margin: 0 0 8px; padding: 8px 10px; border-radius: 6px; font-size: 12px; }
+.dup[hidden] { display: none; }
+.dup.ok { padding: 0; color: var(--ok); }
+.dup.info { padding: 0; color: var(--muted); }
+.dup.warn { background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.dup.warn strong { color: var(--warn); }
+.dup ul { margin: 6px 0 0; padding-left: 16px; }
+.dup li { margin-bottom: 4px; }
+.dup a { color: var(--accent); }
+.dup button.link { margin-top: 0; }
+#int-report a { color: var(--accent); }
+#int-report button.link { margin-top: 0; }

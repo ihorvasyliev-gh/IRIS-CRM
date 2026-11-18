@@ -64,6 +64,8 @@ test('IRIS fields and Auto Address query from a student', () => {
     cab: 'Cork City (17-1)',
   });
   assert.equal(toIrisFields(student, null).find((f) => f.key === 'registration').value, null);
+  assert.equal(toIrisFields(student, null, '  ').find((f) => f.key === 'staff'), undefined);
+  assert.deepEqual(toIrisFields(student, null, ' Olena ').find((f) => f.key === 'staff').value, { name: 'Olena', match: 'one' });
   assert.equal(autoAddressQuery(student), 'T12 AB34');
   assert.equal(autoAddressQuery({ address: '1 Main St' }), '1 Main St');
 });
@@ -555,4 +557,16 @@ test('search over people already loaded follows the CRM search', () => {
   assert.equal(matchesSearch(anna, '+35387'), true);
   assert.equal(matchesSearch(anna, '999'), false);
   assert.equal(matchesSearch({ first_name: null }, 'x'), false);
+});
+
+test('fill: no Action for the wanted year puts the newest and says so', async () => {
+  const { attrs, Xrm } = fakeInterventionForm(TABLES);
+  await withPage({ Xrm }, async () => {
+    const result = await fillIrisForm(interventionFields('registration', '2024-03-12T09:00:00'));
+    const action = result.results.find((r) => r.key === 'action');
+    assert.equal(action.status, 'other-year');
+    assert.equal(action.message, 'IRIS has none for 2024, “(2026) 09 SUPPORTS TO NEW ARRIVALS” was put');
+    assert.deepEqual(attrs.Action.value, [{ id: 'a26', name: '(2026) 09 SUPPORTS TO NEW ARRIVALS', entityType: 'sic_action' }]);
+    assert.equal('otherYear' in attrs.Action.value, false);
+  });
 });
