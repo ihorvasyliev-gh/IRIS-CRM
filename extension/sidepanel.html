@@ -11,10 +11,18 @@
 </head>
 <body>
   <header>
-    <strong>CRM → IRIS <small id="version" class="hint"></small></strong>
+    <div class="brand">
+      <span class="logo" aria-hidden="true">C→I</span>
+      <strong>CRM → IRIS</strong>
+      <small id="version"></small>
+    </div>
     <span class="links">
-      <button id="open-settings" class="link" hidden aria-expanded="false" aria-controls="settings">Settings</button>
-      <button id="logout" class="link" hidden>Sign out</button>
+      <button id="open-settings" class="icon" hidden aria-expanded="false" aria-controls="settings" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 6.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm0 5.5a2 2 0 1 1 0-4 2 2 0 0 1 0 4Zm7.2-3.1-1.5-.3a5.9 5.9 0 0 0-.6-1.4l.9-1.3a.8.8 0 0 0-.1-1l-1.3-1.3a.8.8 0 0 0-1-.1l-1.3.9c-.4-.3-.9-.5-1.4-.6L10.6 2a.8.8 0 0 0-.8-.6H8.2a.8.8 0 0 0-.8.6l-.3 1.5c-.5.1-1 .3-1.4.6l-1.3-.9a.8.8 0 0 0-1 .1L2.1 4.6a.8.8 0 0 0-.1 1l.9 1.3c-.3.4-.5.9-.6 1.4L.8 8.6a.8.8 0 0 0-.6.8v1.8c0 .4.2.7.6.8l1.5.3c.1.5.3 1 .6 1.4l-.9 1.3a.8.8 0 0 0 .1 1l1.3 1.3c.3.3.7.3 1 .1l1.3-.9c.4.3.9.5 1.4.6l.3 1.5c.1.4.4.6.8.6h1.8c.4 0 .7-.2.8-.6l.3-1.5c.5-.1 1-.3 1.4-.6l1.3.9c.3.2.7.2 1-.1l1.3-1.3c.3-.3.3-.7.1-1l-.9-1.3c.3-.4.5-.9.6-1.4l1.5-.3c.4-.1.6-.4.6-.8V9.7c0-.4-.2-.7-.6-.8Z" fill="currentColor"/></svg>
+      </button>
+      <button id="logout" class="icon" hidden title="Sign out" aria-label="Sign out">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 3H4.5A1.5 1.5 0 0 0 3 4.5v11A1.5 1.5 0 0 0 4.5 17H8v-1.5H4.5v-11H8V3Zm5.5 3-1 1 2.2 2.2H7v1.6h7.7L12.5 13l1 1 4-4-4-4Z" fill="currentColor"/></svg>
+      </button>
     </span>
   </header>
 
@@ -23,7 +31,7 @@
     <button id="update-now" type="button">Update</button>
   </p>
 
-  <section id="setup" hidden>
+  <section id="setup" class="card" hidden>
     <h2>Connect to the CRM</h2>
     <p class="hint">One-time setup. Both values are in Supabase → Project Settings → API (or in the CRM's <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code>).</p>
     <form id="setup-form">
@@ -33,7 +41,7 @@
     </form>
   </section>
 
-  <section id="login" hidden>
+  <section id="login" class="card" hidden>
     <h2>Sign in with your CRM account</h2>
     <form id="login-form">
       <label>Email <input name="email" type="email" autocomplete="username" required /></label>
@@ -45,53 +53,84 @@
   </section>
 
   <section id="main" hidden>
-    <div id="settings" hidden>
+    <div id="settings" class="card settings" hidden>
       <label>LDC Staff Member
         <input id="set-staff" type="text" placeholder="You, the signed-in IRIS user" autocomplete="off" />
       </label>
       <p class="hint">Who Fill IRIS form and the intervention buttons put as the staff member. Type the name as IRIS shows it, a part of it is enough. Leave empty for yourself.</p>
     </div>
 
-    <p id="iris-form" class="iris-form" hidden></p>
+    <div class="sticky">
+      <p id="iris-form" class="iris-form" hidden></p>
+      <div class="search-box">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.5 3a5.5 5.5 0 0 1 4.4 8.8l4 4-1.1 1.1-4-4A5.5 5.5 0 1 1 8.5 3Zm0 1.5a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" fill="currentColor"/></svg>
+        <input id="search" type="search" placeholder="Name, email, phone or Eircode" autocomplete="off" autofocus aria-controls="results" />
+      </div>
+      <div class="search-row">
+        <label class="check"><input id="working-only" type="checkbox" /> Only people who are working</label>
+        <span class="keys" title="Move with the arrow keys, pick with Enter, run the highlighted step with Ctrl+Enter"><kbd>↑</kbd><kbd>↓</kbd><kbd>Enter</kbd></span>
+      </div>
+    </div>
 
-    <input id="search" type="search" placeholder="Name, email, phone or Eircode" autofocus />
-    <label class="check"><input id="working-only" type="checkbox" /> Only people who are working</label>
     <p id="search-state" class="hint"></p>
-    <ul id="results"></ul>
+    <ul id="results" role="listbox" aria-label="People"></ul>
+
+    <p id="pick-hint" class="empty-state">Pick a person to fill IRIS. Type a name, move with <kbd>↑</kbd> <kbd>↓</kbd> and press <kbd>Enter</kbd>.</p>
 
     <div id="selected" hidden>
-      <h2 id="sel-name"></h2>
-      <dl id="sel-fields"></dl>
-      <div id="dup" class="dup" hidden></div>
-      <button id="fill" data-form="individual">Fill IRIS form</button>
-      <ul id="fill-report"></ul>
-
-      <h3>New Individual Intervention</h3>
-      <div class="buttons">
-        <button id="int-registration" data-form="intervention" title="Action, staff, one-to-one meeting on the first registration date, Career guidance, Reg, plan agreed, no status change">Registration</button>
-        <button id="int-course" data-form="intervention" title="Action, staff and Labour market related course; the rest by hand">Course</button>
+      <div class="card person">
+        <h2 id="sel-name"></h2>
+        <p id="sel-contact" class="facts"></p>
+        <p id="sel-more" class="facts muted"></p>
+        <div id="sel-missing" class="chips"></div>
       </div>
-      <ul id="int-report"></ul>
 
-      <h3>Job outcome</h3>
-      <p id="outcome-state" class="hint"></p>
-      <div id="outcome-form" hidden>
-        <p id="outcome-said"></p>
-        <label>Occupational group
-          <select id="out-occupation"></select>
-        </label>
-        <div id="out-chips" class="chips"></div>
-        <p id="out-why" class="hint"></p>
-        <div class="pair">
-          <label>Employment start <input id="out-start" type="text" inputmode="numeric" placeholder="dd/mm/yyyy" autocomplete="off" /></label>
-          <label>Contract type <select id="out-contract"></select></label>
+      <ol id="steps" class="steps" aria-label="Steps in IRIS"></ol>
+
+      <section class="block" id="sec-individual" data-step="individual">
+        <button type="button" class="block-head" aria-expanded="true"><span>New Individual</span><span class="state"></span></button>
+        <div class="block-body">
+          <div id="dup" class="dup" hidden></div>
+          <button id="fill" class="wide" data-step="individual" data-label="Fill IRIS form">Fill IRIS form</button>
+          <ul id="fill-report" class="report"></ul>
         </div>
-        <p class="hint under">The CRM knows the month only, so the start is the 1st.</p>
-        <label>Date of intervention <input id="out-date" type="text" inputmode="numeric" placeholder="dd/mm/yyyy" autocomplete="off" /></label>
-        <button id="int-outcome" data-form="intervention" title="Action, staff, date, a case note, status change Yes, Current Economic Status, Employment Start Date, Occupational group and Contract Type">Fill job outcome</button>
-      </div>
-      <ul id="outcome-report"></ul>
-      <p id="outcome-done" class="hint" hidden><span id="outcome-done-text"></span> <button id="outcome-undo" class="link">Remove the tick</button></p>
+      </section>
+
+      <section class="block" id="sec-interventions" data-step="interventions">
+        <button type="button" class="block-head" aria-expanded="false"><span>Interventions</span><span class="state"></span></button>
+        <div class="block-body">
+          <div class="buttons">
+            <button id="int-registration" data-step="registration" data-label="Registration" title="Action, staff, one-to-one meeting on the first registration date, Career guidance, Reg, plan agreed, no status change">Registration</button>
+            <button id="int-course" data-step="course" data-label="Course" title="Action, staff and Labour market related course; the rest by hand">Course</button>
+          </div>
+          <p class="hint small">Works on an intervention form, or on the person's own form: a new intervention is opened for them.</p>
+          <ul id="int-report" class="report"></ul>
+        </div>
+      </section>
+
+      <section class="block" id="sec-outcome" data-step="outcome">
+        <button type="button" class="block-head" aria-expanded="false"><span>Job outcome</span><span class="state"></span></button>
+        <div class="block-body">
+          <p id="outcome-state" class="hint"></p>
+          <div id="outcome-form" hidden>
+            <p id="outcome-said"></p>
+            <label>Occupational group
+              <select id="out-occupation"></select>
+            </label>
+            <div id="out-chips" class="chips"></div>
+            <p id="out-why" class="hint"></p>
+            <div class="pair">
+              <label>Employment start <input id="out-start" type="text" inputmode="numeric" placeholder="dd/mm/yyyy" autocomplete="off" /></label>
+              <label>Contract type <select id="out-contract"></select></label>
+            </div>
+            <p class="hint under">The CRM knows the month only, so the start is the 1st.</p>
+            <label>Date of intervention <input id="out-date" type="text" inputmode="numeric" placeholder="dd/mm/yyyy" autocomplete="off" /></label>
+            <button id="int-outcome" class="wide" data-step="outcome" data-label="Fill job outcome" title="Action, staff, date, a case note, status change Yes, Current Economic Status, Employment Start Date, Occupational group and Contract Type">Fill job outcome</button>
+          </div>
+          <ul id="outcome-report" class="report"></ul>
+          <p id="outcome-done" class="hint" hidden><span id="outcome-done-text"></span> <button id="outcome-undo" class="link">Remove the tick</button></p>
+        </div>
+      </section>
     </div>
   </section>
 </body>

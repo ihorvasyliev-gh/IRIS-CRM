@@ -554,12 +554,14 @@ export function isStrongMatch(match) {
 /**
  * Runs inside the IRIS page (main world). Says which kind of form is open:
  * 'individual' (has First Name and Last Name), 'intervention' (has Intervention
- * Type), 'other' for any other form, 'none' when no form is open.
+ * Type), 'other' for any other form, 'page' for IRIS without a form, 'none' when not IRIS.
  */
 export function irisFormInfo() {
   const Xrm = window.Xrm;
-  const page = Xrm && Xrm.Page;
-  if (!page || !page.ui || !page.ui.controls || !page.data || !page.data.entity) return { kind: 'none' };
+  if (!Xrm) return { kind: 'none' };
+  const page = Xrm.Page;
+  // IRIS without a form: a list, a dashboard.
+  if (!page || !page.ui || !page.ui.controls || !page.data || !page.data.entity) return { kind: 'page' };
   const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const labels = new Set((page.ui.controls.get() || [])
     .filter((c) => typeof c.getLabel === 'function')
@@ -577,30 +579,31 @@ export function irisFormInfo() {
  * the same first and last name. The fields are found by their labels on the
  * open form, so their names never have to be guessed.
  */
-export async function findIrisDuplicates(person) {
+export async function findIrisDuplicates(person, cached = null) {
   const Xrm = window.Xrm;
-  const page = Xrm && Xrm.Page;
-  if (!page || !page.ui || !page.ui.controls || !page.data || !page.data.entity || !Xrm.WebApi || !Xrm.Utility) {
-    return { ok: false, error: 'no-form' };
-  }
+  if (!Xrm || !Xrm.WebApi || !Xrm.Utility) return { ok: false, error: 'no-form' };
+  const page = Xrm.Page;
+  const onForm = Boolean(page && page.ui && page.ui.controls && page.data && page.data.entity);
   const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const controls = (page.ui.controls.get() || []).filter((c) =>
-    typeof c.getAttribute === 'function' && typeof c.getLabel === 'function' && c.getAttribute());
+  const controls = onForm ? (page.ui.controls.get() || []).filter((c) =>
+    typeof c.getAttribute === 'function' && typeof c.getLabel === 'function' && c.getAttribute()) : [];
   const attrName = (labels) => {
     const wanted = labels.map(norm);
     const control = controls.find((c) => wanted.includes(norm(c.getLabel())));
     return control ? control.getAttribute().getName() : null;
   };
-  const f = {
+  let f = {
     first: attrName(['First Name']),
     last: attrName(['Last Name']),
     email: attrName(['Email']),
     phone: attrName(['Mobile No.', 'Mobile No', 'Mobile Phone']),
     dob: attrName(['Date of Birth']),
   };
-  if (!f.first || !f.last) return { ok: false, error: 'not-individual' };
+  let entity = f.first && f.last ? page.data.entity.getEntityName() : '';
+  // Away from an individual's form, the field names learnt on one earlier are used.
+  if (!entity && cached && cached.entity && cached.f && cached.f.first && cached.f.last) ({ entity, f } = cached);
+  if (!entity) return { ok: false, error: onForm ? 'not-individual' : 'no-form' };
   try {
-    const entity = page.data.entity.getEntityName();
     const meta = await Xrm.Utility.getEntityMetadata(entity, []);
     const odata = (text) => `'${String(text).replace(/'/g, "''")}'`;
     const ors = [];
@@ -611,11 +614,10 @@ export async function findIrisDuplicates(person) {
       ors.push(`contains(${f.phone},${odata(`${person.phoneTail.slice(0, 3)} ${person.phoneTail.slice(3)}`)})`);
     }
     if (person.first && person.last) ors.push(`(${f.first} eq ${odata(person.first)} and ${f.last} eq ${odata(person.last)})`);
-    if (!ors.length) return { ok: true, matches: [] };
+    if (!ors.length) return { ok: true, matches: [], schema: { entity, f } };
     const columns = [...new Set([meta.PrimaryIdAttribute, meta.PrimaryNameAttribute, ...Object.values(f).filter(Boolean)])];
     const found = await Xrm.WebApi.retrieveMultipleRecords(entity, `?$select=${columns.join(',')}&$filter=${ors.join(' or ')}&$top=10`);
 
-    const currentId = String(page.data.entity.getId() || '').replace(/[{}]/g, '').toLowerCase();
     const digits = (s) => String(s || '').replace(/\D/g, '');
     // A date-only field comes back as "1990-04-23"; a date-time one as a moment, read in local time.
     const day = (v) => {
@@ -628,8 +630,8 @@ export async function findIrisDuplicates(person) {
     const ctx = Xrm.Utility.getGlobalContext();
     const base = ctx && ctx.getClientUrl ? ctx.getClientUrl() : location.origin;
     const appId = new URLSearchParams(location.search).get('appid');
+    // The record on the form is not left out: a saved form may be this very person.
     const matches = found.entities
-      .filter((r) => String(r[meta.PrimaryIdAttribute]).toLowerCase() !== currentId)
       .map((r) => {
         const dob = f.dob ? day(r[f.dob]) : '';
         const why = [];
@@ -639,6 +641,7 @@ export async function findIrisDuplicates(person) {
         if (person.dob && dob === person.dob) why.push('date of birth');
         const id = r[meta.PrimaryIdAttribute];
         return {
+          id,
           name: r[meta.PrimaryNameAttribute] || `${r[f.first] || ''} ${r[f.last] || ''}`.trim(),
           email: f.email ? r[f.email] || '' : '',
           phone: f.phone ? r[f.phone] || '' : '',
@@ -648,7 +651,7 @@ export async function findIrisDuplicates(person) {
         };
       })
       .filter((m) => m.why.some((w) => w !== 'date of birth'));
-    return { ok: true, matches };
+    return { ok: true, matches, schema: { entity, f } };
   } catch (e) {
     return { ok: false, error: String(e && e.message || e) };
   }
@@ -730,48 +733,63 @@ export function openIrisNewForm(entity) {
 }
 
 /**
- * Runs inside the IRIS page (main world), on an intervention form whose
- * individual is already set (as it is when opened from the individual's form).
- * Finds that individual's other interventions that look like a registration:
- * Intervention Type "One-to-one meeting" and Case Notes starting with "Reg".
- * Answers { ok: false, error: 'no-individual' } when the form has no individual yet.
+ * Runs inside the IRIS page (main world). Finds an individual's interventions
+ * that look like a registration: Intervention Type "One-to-one meeting" and
+ * Case Notes starting with "Reg".
+ * On an intervention form the individual and the field names come from the
+ * form (its individual must be set, as it is when opened from the individual's
+ * form). Elsewhere `cached` (the `schema` of an earlier answer) and
+ * `individualId` are used. Answers { ok: false, error } when neither is there.
  */
-export async function findIrisRegistrations(individualEntity) {
+export async function findIrisRegistrations(individualEntity, cached = null, individualId = '') {
   const Xrm = window.Xrm;
-  const page = Xrm && Xrm.Page;
-  if (!page || !page.ui || !page.ui.controls || !page.data || !page.data.entity || !Xrm.WebApi || !Xrm.Utility) {
-    return { ok: false, error: 'no-form' };
-  }
+  if (!Xrm || !Xrm.WebApi || !Xrm.Utility) return { ok: false, error: 'no-form' };
+  const page = Xrm.Page;
+  const onForm = Boolean(page && page.ui && page.ui.controls && page.data && page.data.entity);
   const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const controls = (page.ui.controls.get() || []).filter((c) =>
-    typeof c.getAttribute === 'function' && typeof c.getLabel === 'function' && c.getAttribute());
+  const controls = onForm ? (page.ui.controls.get() || []).filter((c) =>
+    typeof c.getAttribute === 'function' && typeof c.getLabel === 'function' && c.getAttribute()) : [];
   const attrOf = (label) => {
     const control = controls.find((c) => norm(c.getLabel()) === norm(label));
     return control ? control.getAttribute() : null;
   };
+  let schema = null;
+  let who = null;
   const type = attrOf('Intervention Type');
   const notes = attrOf('Case Notes');
-  const date = attrOf('Date of Intervention');
-  if (!type || !notes) return { ok: false, error: 'not-intervention' };
-  const oneToOne = (type.getOptions() || []).find((o) => norm(o.text) === norm('One-to-one meeting'));
-  if (!oneToOne) return { ok: false, error: 'no-one-to-one' };
-
-  // The lookup that holds the individual: the one pointing at the individuals' table.
-  if (!individualEntity) return { ok: false, error: 'no-individual' };
-  const individual = controls.map((c) => c.getAttribute()).find((a) => {
-    const v = typeof a.getValue === 'function' ? a.getValue() : null;
-    return Array.isArray(v) && v[0] && v[0].entityType === individualEntity;
-  });
-  const who = individual && individual.getValue()[0];
-  if (!who || !who.id) return { ok: false, error: 'no-individual' };
+  if (type && notes) {
+    const oneToOne = (type.getOptions() || []).find((o) => norm(o.text) === norm('One-to-one meeting'));
+    if (!oneToOne) return { ok: false, error: 'no-one-to-one' };
+    const date = attrOf('Date of Intervention');
+    // The lookup that holds the individual: the one pointing at the individuals' table.
+    if (!individualEntity) return { ok: false, error: 'no-individual' };
+    const individual = controls.map((c) => c.getAttribute()).find((a) => {
+      const v = typeof a.getValue === 'function' ? a.getValue() : null;
+      return Array.isArray(v) && v[0] && v[0].entityType === individualEntity;
+    });
+    who = individual && individual.getValue()[0];
+    if (!who || !who.id) return { ok: false, error: 'no-individual' };
+    schema = {
+      entity: page.data.entity.getEntityName(),
+      individual: individual.getName(),
+      type: type.getName(),
+      oneToOne: oneToOne.value,
+      notes: notes.getName(),
+      date: date ? date.getName() : '',
+    };
+  } else if (cached && cached.entity && individualId) {
+    schema = cached;
+    who = { id: individualId, name: '' };
+  } else {
+    return { ok: false, error: onForm ? 'not-intervention' : 'no-form' };
+  }
   try {
-    const entity = page.data.entity.getEntityName();
-    const meta = await Xrm.Utility.getEntityMetadata(entity, []);
+    const meta = await Xrm.Utility.getEntityMetadata(schema.entity, []);
     const id = String(who.id).replace(/[{}]/g, '');
-    const columns = [meta.PrimaryIdAttribute, type.getName(), notes.getName(), date ? date.getName() : null].filter(Boolean);
-    const filter = `_${individual.getName()}_value eq ${id} and ${type.getName()} eq ${oneToOne.value}`;
-    const found = await Xrm.WebApi.retrieveMultipleRecords(entity, `?$select=${columns.join(',')}&$filter=${filter}&$top=20`);
-    const currentId = String(page.data.entity.getId() || '').replace(/[{}]/g, '').toLowerCase();
+    const columns = [meta.PrimaryIdAttribute, schema.type, schema.notes, schema.date].filter(Boolean);
+    const filter = `_${schema.individual}_value eq ${id} and ${schema.type} eq ${schema.oneToOne}`;
+    const found = await Xrm.WebApi.retrieveMultipleRecords(schema.entity, `?$select=${columns.join(',')}&$filter=${filter}&$top=20`);
+    const currentId = onForm ? String(page.data.entity.getId() || '').replace(/[{}]/g, '').toLowerCase() : '';
     const day = (v) => {
       if (!v) return '';
       const s = String(v);
@@ -784,13 +802,13 @@ export async function findIrisRegistrations(individualEntity) {
     const appId = new URLSearchParams(location.search).get('appid');
     const matches = found.entities
       .filter((r) => String(r[meta.PrimaryIdAttribute]).toLowerCase() !== currentId)
-      .filter((r) => /^\s*reg/i.test(String(r[notes.getName()] || '')))
+      .filter((r) => /^\s*reg/i.test(String(r[schema.notes] || '')))
       .map((r) => ({
-        date: date ? day(r[date.getName()]) : '',
-        notes: String(r[notes.getName()] || '').trim().slice(0, 60),
-        url: `${base}/main.aspx?${appId ? `appid=${encodeURIComponent(appId)}&` : ''}pagetype=entityrecord&etn=${entity}&id=${r[meta.PrimaryIdAttribute]}`,
+        date: schema.date ? day(r[schema.date]) : '',
+        notes: String(r[schema.notes] || '').trim().slice(0, 60),
+        url: `${base}/main.aspx?${appId ? `appid=${encodeURIComponent(appId)}&` : ''}pagetype=entityrecord&etn=${schema.entity}&id=${r[meta.PrimaryIdAttribute]}`,
       }));
-    return { ok: true, name: who.name || '', matches };
+    return { ok: true, name: who.name || '', matches, schema };
   } catch (e) {
     return { ok: false, error: String(e && e.message || e) };
   }
