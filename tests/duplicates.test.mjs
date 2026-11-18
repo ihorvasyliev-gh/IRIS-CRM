@@ -56,6 +56,9 @@ test('which form is open', async () => {
   const intervention = fakeForm({ labels: [['Action', 'a'], ['Intervention Type', 'b']], formType: 2 }).Xrm;
   assert.deepEqual(await inPage(intervention, () => irisFormInfo()), { kind: 'intervention', isNew: false, entity: 'contact' });
   assert.equal((await inPage(fakeForm({ labels: [['Name', 'n']] }).Xrm, () => irisFormInfo())).kind, 'other');
+  const grid = fakeForm({ labels: [] }).Xrm;
+  grid.Page = {};
+  assert.deepEqual(await inPage(grid, () => irisFormInfo()), { kind: 'page' });
 });
 
 test('duplicates: searched by the form\'s own fields, matched and linked', async () => {
@@ -71,10 +74,21 @@ test('duplicates: searched by the form\'s own fields, matched and linked', async
   assert.equal(queries.length, 1);
   assert.match(queries[0], /^contact\?\$select=contactid,fullname,firstname,lastname,emailaddress1,mobilephone,birthdate&/);
   assert.match(queries[0], /emailaddress1 eq 'anna@x\.ie' or contains\(mobilephone,'1234567'\) or contains\(mobilephone,'123 4567'\) or \(firstname eq 'Anna' and lastname eq 'Kowalska'\)/);
-  assert.deepEqual(result.matches.map((m) => [m.name, m.why]), [
-    ['Anna Kowalska', ['email', 'phone', 'name', 'date of birth']],
-    ['Anna Kowalska', ['name']],
+  // The record on the form itself counts too: a saved form may be this very person.
+  assert.deepEqual(result.matches.map((m) => [m.id, m.why]), [
+    ['c1', ['email', 'phone', 'name', 'date of birth']],
+    ['c2', ['name']],
+    ['self', ['name']],
   ]);
+  assert.deepEqual(result.schema, { entity: 'contact', f: { first: 'firstname', last: 'lastname', email: 'emailaddress1', phone: 'mobilephone', dob: 'birthdate' } });
+
+  // Away from the form, the learnt field names are used.
+  const grid = fakeForm({ labels: [], rows });
+  grid.Xrm.Page = {};
+  const away = await inPage(grid.Xrm, () => findIrisDuplicates(duplicateQuery(ANNA), result.schema));
+  assert.equal(away.matches.length, 3);
+  assert.match(grid.queries[0], /^contact\?\$select=contactid,fullname,firstname,lastname,emailaddress1,mobilephone,birthdate&/);
+  assert.deepEqual(await inPage(grid.Xrm, () => findIrisDuplicates(duplicateQuery(ANNA))), { ok: false, error: 'no-form' });
   assert.equal(result.matches[0].url, 'https://sicap.crm4.dynamics.com/main.aspx?appid=app-1&pagetype=entityrecord&etn=contact&id=c1');
   assert.equal(isStrongMatch(result.matches[0]), true);
   assert.equal(isStrongMatch(result.matches[1]), false);
@@ -191,4 +205,17 @@ test('registrations: no individual on the form, unknown table, not an interventi
   assert.deepEqual(await inPage(registrationForm({ individual: null }).Xrm, () => findIrisRegistrations('contact')), { ok: false, error: 'no-individual' });
   assert.deepEqual(await inPage(registrationForm().Xrm, () => findIrisRegistrations(null)), { ok: false, error: 'no-individual' });
   assert.deepEqual(await inPage(fakeForm({ labels: INDIVIDUAL }).Xrm, () => findIrisRegistrations('contact')), { ok: false, error: 'not-intervention' });
+});
+
+test('registrations: away from the form, by the learnt fields and the individual id', async () => {
+  const rows = [{ sic_interventionid: 'i1', sic_notes: 'Reg', sic_date: '2026-03-12' }];
+  const { Xrm } = registrationForm({ rows });
+  const first = await inPage(Xrm, () => findIrisRegistrations('contact'));
+  assert.deepEqual(first.schema, { entity: 'sic_intervention', individual: 'sic_individualid', type: 'sic_type', oneToOne: 7, notes: 'sic_notes', date: 'sic_date' });
+  const grid = registrationForm({ rows });
+  grid.Xrm.Page = {};
+  const away = await inPage(grid.Xrm, () => findIrisRegistrations('contact', first.schema, '{C9}'));
+  assert.equal(grid.queries[0], 'sic_intervention?$select=sic_interventionid,sic_type,sic_notes,sic_date&$filter=_sic_individualid_value eq C9 and sic_type eq 7&$top=20');
+  assert.equal(away.matches.length, 1);
+  assert.deepEqual(await inPage(grid.Xrm, () => findIrisRegistrations('contact', null, 'C9')), { ok: false, error: 'no-form' });
 });

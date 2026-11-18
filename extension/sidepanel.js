@@ -87,6 +87,17 @@ let interventionEntity = '';
 let individualEntity = '';
 // The IRIS duplicate check per student id: { state: 'checking' | 'done' | 'error', matches, error, confirmed, stopped }.
 const dupChecks = new Map();
+// Field names learnt on IRIS forms, so the checks also work from any other IRIS page.
+let individualSchema = null;
+let registrationSchema = null;
+// Registrations found in IRIS per student id: an array (maybe empty), absent when unknown.
+const registrationsFound = new Map();
+// What the panel filled in this session per student id: a Set of step keys.
+const progress = new Map();
+// Sections opened by hand; null lets the panel choose from the IRIS form and the next step.
+let manualSections = null;
+// The search result highlighted with the arrow keys.
+let focusIndex = -1;
 let searchSeq = 0;
 let searchTimer = null;
 
@@ -118,7 +129,10 @@ setInterval(checkForUpdate, 10 * 60 * 1000);
 async function start() {
   const saved = await chrome.storage.local.get([
     'supabaseUrl', 'supabaseKey', 'irisLists', 'occupationMemory', 'contractMemory', 'outcomeFilled', 'workingOnly', 'staffName', 'interventionEntity', 'individualEntity',
+    'individualSchema', 'registrationSchema',
   ]);
+  individualSchema = saved.individualSchema || null;
+  registrationSchema = saved.registrationSchema || null;
   interventionEntity = saved.interventionEntity || '';
   individualEntity = saved.individualEntity || '';
   // A connection baked into config.js wins over the one typed in the setup form.
@@ -221,7 +235,7 @@ $('working-only').addEventListener('change', (e) => {
 $('open-settings').addEventListener('click', (e) => {
   const open = $('settings').hidden;
   $('settings').hidden = !open;
-  e.target.setAttribute('aria-expanded', String(open));
+  e.currentTarget.setAttribute('aria-expanded', String(open));
   if (open) $('set-staff').focus();
 });
 
@@ -246,6 +260,9 @@ async function runSearch() {
     return;
   }
   students = found.students;
+  // Arrow keys start from the picked person, else from the first match of a search.
+  focusIndex = students.findIndex((x) => x.id === selectedId);
+  if (focusIndex < 0 && query.trim()) focusIndex = 0;
   $('search-state').textContent = found.note;
   renderResults();
 }
@@ -300,13 +317,22 @@ function isFilled(id) {
 function renderResults() {
   const list = $('results');
   list.replaceChildren(
-    ...students.map((s) => {
+    ...students.map((s, i) => {
       const li = document.createElement('li');
       const outcome = workingOnly ? outcomes.get(s.id) : null;
       const done = Boolean(outcome) && isFilled(s.id);
-      li.className = [s.id === selectedId ? 'active' : '', done ? 'done' : ''].filter(Boolean).join(' ');
+      li.className = [s.id === selectedId ? 'active' : '', done ? 'done' : '', i === focusIndex ? 'focus' : ''].filter(Boolean).join(' ');
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', String(s.id === selectedId));
+      const full = `${s.first_name || ''} ${s.last_name || ''}`.trim();
+      const avatar = document.createElement('span');
+      avatar.className = 'avatar';
+      avatar.textContent = initials(s);
+      const who = document.createElement('div');
+      who.className = 'who';
       const name = document.createElement('div');
-      name.textContent = `${s.first_name || ''} ${s.last_name || ''}`.trim() || '(no name)';
+      name.className = 'name';
+      name.textContent = full || '(no name)';
       const sub = document.createElement('div');
       sub.className = 'sub';
       // On the working list the job says more than the contact details.
@@ -317,7 +343,8 @@ function renderResults() {
           outcome.last_responded_at ? `answered ${answeredOn(outcome)}` : '',
         ]
         : [s.email, toIrishLocalPhone(s.phone), formatDate(s.dob)]).filter(Boolean).join(' · ');
-      li.append(name, sub);
+      who.append(name, sub);
+      li.append(avatar, who);
       li.addEventListener('click', () => select(s.id));
       return li;
     }),
@@ -331,9 +358,12 @@ function select(id) {
   $('fill-report').replaceChildren();
   $('int-report').replaceChildren();
   $('outcome-report').replaceChildren();
+  focusIndex = students.findIndex((x) => x.id === id);
+  manualSections = null;
   // A fresh look in IRIS for every pick: the person may have been added since.
   dupChecks.delete(id);
-  if (formInfo.kind === 'individual') checkDuplicates(id);
+  registrationsFound.delete(id);
+  checkDuplicates(id);
   renderResults();
   loadFirstRegistration(id);
   loadOutcome(id);
@@ -367,27 +397,35 @@ async function loadFirstRegistration(id) {
 function renderSelected() {
   const s = students.find((x) => x.id === selectedId);
   $('selected').hidden = !s;
+  $('pick-hint').hidden = Boolean(s);
   if (!s) return;
-  $('sel-name').textContent = `${s.first_name || ''} ${s.last_name || ''}`.trim();
-  const rows = [
-    ['Mobile', toIrishLocalPhone(s.phone)],
-    ['Email', s.email],
-    ['Date of birth', formatDate(s.dob)],
-    ['Address', s.address],
-    ['Eircode', s.eircode],
-    ['First registered', registeredText(s.id)],
-  ];
-  $('sel-fields').replaceChildren(
-    ...rows.flatMap(([label, value]) => {
-      const dt = document.createElement('dt');
-      dt.textContent = label;
-      const dd = document.createElement('dd');
-      dd.textContent = value || '—';
-      return [dt, dd];
-    }),
-  );
+  $('pick-hint').hidden = true;
+  $('sel-name').textContent = `${s.first_name || ''} ${s.last_name || ''}`.trim() || '(no name)';
+  $('sel-contact').textContent = [toIrishLocalPhone(s.phone), s.email].filter(Boolean).join(' · ');
+  const registered = registeredText(s.id);
+  $('sel-more').textContent = [
+    s.dob ? `Born ${formatDate(s.dob)}` : '',
+    [s.address, s.eircode && s.eircode.toUpperCase()].filter(Boolean).join(', '),
+    /^\d/.test(registered) ? `Registered ${registered}` : '',
+  ].filter(Boolean).join(' · ');
+  // What the CRM lacks shows before filling, not in the report after.
+  const missing = [
+    !s.phone && 'No phone',
+    !s.email && 'No email',
+    !s.dob && 'No date of birth',
+    !s.eircode && !s.address && 'No address',
+    s.address && !s.eircode && 'No Eircode',
+    firstRegistered.get(s.id) === null && 'No course registration',
+  ].filter(Boolean);
+  $('sel-missing').replaceChildren(...missing.map((text) => {
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = text;
+    return tag;
+  }));
   renderDuplicates();
   renderOutcome();
+  renderJourney();
 }
 
 const occupationList = () => (irisLists.occupation && irisLists.occupation.length ? irisLists.occupation : DEFAULT_OCCUPATION_OPTIONS);
@@ -530,6 +568,7 @@ function renderOutcome() {
   setDate($('out-date'), draft.intervention);
   $('outcome-done').hidden = !isFilled(s.id);
   $('outcome-done-text').textContent = isFilled(s.id) ? `Filled in IRIS on ${filledOn(s.id)}.` : '';
+  renderJourney();
 }
 
 // The tick was a mistake (the form was not saved, or it was another person's).
@@ -612,7 +651,9 @@ function remember(sent, results) {
   renderOutcome();
 }
 
-$('int-outcome').addEventListener('click', async () => {
+$('int-outcome').addEventListener('click', () => { if (draft) withBusy($('int-outcome'), 'Filling…', fillOutcome); });
+
+async function fillOutcome() {
   if (!draft) return;
   const report = $('outcome-report');
   const buttons = document.querySelectorAll('#selected button');
@@ -641,13 +682,13 @@ $('int-outcome').addEventListener('click', async () => {
       employment_start: 'no date: type it above as dd/mm/yyyy',
       occupation: 'not chosen: choose it above or on the form',
       contract: 'not chosen: choose it above or on the form',
-    });
+    }, 'outcome');
   } catch (e) {
     renderReport(report, { ok: false, error: String(e && e.message || e) });
   } finally {
     buttons.forEach((b) => { b.disabled = false; });
   }
-});
+}
 
 function registeredText(id) {
   if (!firstRegistered.has(id)) return '…';
@@ -661,7 +702,8 @@ function registeredText(id) {
 // `after` may add to the result, e.g. the Auto Address step.
 // With `intervention`, an individual's form first gets a new intervention opened from it.
 // `precheck(student, report)` may stop the fill once the right form is open.
-async function fillFromPanel(report, buildFields, after, intervention = false, precheck = null) {
+// `step` is marked done in the steps strip when the fill went through.
+async function fillFromPanel(report, buildFields, after, intervention = false, precheck = null, step = '') {
   const s = students.find((x) => x.id === selectedId);
   if (!s) return;
   const buttons = document.querySelectorAll('#selected button');
@@ -678,7 +720,8 @@ async function fillFromPanel(report, buildFields, after, intervention = false, p
       args: [buildFields(s, firstRegistered.get(s.id))],
     });
     if (result && result.ok && after) await after(result, tab, s);
-    renderReport(report, result);
+    if (step && result && result.ok && result.results.some((r) => r.status === 'filled')) markDone(s.id, step);
+    renderReport(report, result, {}, step);
   } catch (e) {
     renderReport(report, { ok: false, error: String(e && e.message || e) });
   } finally {
@@ -695,17 +738,59 @@ $('fill').addEventListener('click', async () => {
   // Nothing else may start while a new form opens: two fills would mix.
   const buttons = document.querySelectorAll('#selected button');
   buttons.forEach((b) => { b.disabled = true; });
+  setBusy($('fill'), 'Filling…');
   try {
     await fillNewIndividual(id);
   } finally {
     fillBusy = false;
+    clearBusy();
     buttons.forEach((b) => { b.disabled = false; });
   }
 });
 
+// The button at work shows a spinner and what it is doing.
+let busyButton = null;
+function setBusy(button, text) {
+  clearBusy();
+  busyButton = button;
+  button.classList.add('busy');
+  button.textContent = text;
+}
+function setBusyText(text) {
+  if (busyButton) busyButton.textContent = text;
+}
+function clearBusy() {
+  if (!busyButton) return;
+  busyButton.classList.remove('busy');
+  busyButton.textContent = busyButton.dataset.label;
+  busyButton = null;
+}
+async function withBusy(button, text, run) {
+  setBusy(button, text);
+  try {
+    await run();
+  } finally {
+    clearBusy();
+  }
+}
+
+function markDone(id, step) {
+  const steps = progress.get(id) || new Set();
+  steps.add(step);
+  progress.set(id, steps);
+  if (id === selectedId) renderJourney();
+}
+
 // On a new individual's form fills it; on any other IRIS page opens one first.
 // Either way it looks for the person in IRIS before filling anything.
 async function fillNewIndividual(id) {
+  // Already known to be in IRIS: stop before opening an empty form.
+  const known = dupChecks.get(id);
+  if (known && known.state === 'done' && !known.confirmed && known.matches.some(isStrongMatch)) {
+    known.stopped = true;
+    renderDuplicates();
+    return;
+  }
   if (!(await ensureNewIndividualForm($('fill-report')))) return;
   if (id !== selectedId) return;
   const prior = dupChecks.get(id);
@@ -730,7 +815,8 @@ async function ensureNewIndividualForm(report) {
     say(report, 'Open any individual\'s form in IRIS once (anyone will do), so the panel learns where IRIS keeps individuals. After that this button works from any IRIS page.', 'error');
     return false;
   }
-  say(report, 'Opening a new Individual form in IRIS…');
+  say(report, 'Opening a new Individual form in IRIS…', 'progress');
+  setBusyText('Opening form…');
   let opened;
   try {
     opened = await runInIris(openIrisNewForm, [individualEntity]);
@@ -748,6 +834,7 @@ async function ensureNewIndividualForm(report) {
       // Let IRIS finish loading the form and its Auto Address box.
       await pause(1500);
       report.replaceChildren();
+      setBusyText('Filling…');
       formInfo = now;
       renderFormInfo();
       return true;
@@ -781,7 +868,9 @@ function say(report, text, cls = '') {
 async function ensureInterventionForm(s, report) {
   const info = await readFormInfo();
   if (info.kind !== 'individual') return true;
-  say(report, 'Opening a new Individual Intervention for this person…');
+  say(report, 'Opening a new Individual Intervention for this person…', 'progress');
+  const was = busyButton ? busyButton.textContent : '';
+  setBusyText('Opening form…');
   const opened = await runInIris(openIrisIntervention, [
     interventionEntity || null,
     { first: (s.first_name || '').trim(), last: (s.last_name || '').trim() },
@@ -805,6 +894,8 @@ async function ensureInterventionForm(s, report) {
     if (now.kind === 'intervention') {
       // Let IRIS finish loading the form and copying the individual into it.
       await pause(1500);
+      if (was) setBusyText(was);
+      report.replaceChildren();
       return true;
     }
   }
@@ -813,9 +904,9 @@ async function ensureInterventionForm(s, report) {
 }
 
 function fillIndividual() {
-  fillFromPanel($('fill-report'), (s, at) => toIrisFields(s, at, staffName), async (result, tab, s) => {
+  return fillFromPanel($('fill-report'), (s, at) => toIrisFields(s, at, staffName), async (result, tab, s) => {
     result.address = await typeAddress(tab.id, autoAddressQuery(s));
-  });
+  }, false, null, 'individual');
 }
 
 // Which IRIS form is open. The buttons for another kind of form turn into outlines.
@@ -838,7 +929,12 @@ async function refreshFormInfo() {
   const changed = info.kind !== formInfo.kind || info.isNew !== formInfo.isNew;
   formInfo = info;
   if (changed) renderFormInfo();
-  if (info.kind === 'individual' && selectedId && !dupChecks.has(selectedId)) checkDuplicates(selectedId);
+  // The first IRIS page seen after a pick (or one that can search now): look for the person.
+  if (info.kind !== 'none' && selectedId && !dupChecks.has(selectedId)) checkDuplicates(selectedId);
+  if (changed && manualSections) {
+    manualSections = null;
+    renderJourney();
+  }
 }
 
 function renderFormInfo() {
@@ -851,15 +947,12 @@ function renderFormInfo() {
     name.textContent = `${formInfo.isNew ? 'New ' : ''}${formInfo.kind === 'individual' ? 'Individual' : 'Individual Intervention'}`;
     el.replaceChildren('IRIS: ', name, ' form is open');
   } else {
-    el.textContent = formInfo.kind === 'other' ? 'IRIS: another form is open' : 'No IRIS form in this tab';
+    el.textContent = {
+      other: 'IRIS: another form is open',
+      page: 'IRIS is open, no form',
+    }[formInfo.kind] || 'IRIS is not open in this tab';
   }
-  for (const button of document.querySelectorAll('button[data-form]')) {
-    // The intervention buttons work from an individual's form too: they open a new intervention first.
-    // Fill IRIS form works from any IRIS page: it opens a new individual first.
-    const fits = button.dataset.form === formInfo.kind || button.dataset.form === 'individual'
-      || (button.dataset.form === 'intervention' && formInfo.kind === 'individual');
-    button.classList.toggle('other-form', known && !fits);
-  }
+  renderJourney();
   renderDuplicates();
 }
 
@@ -879,11 +972,20 @@ async function checkDuplicates(id) {
   if (id === selectedId) renderDuplicates();
   let result;
   try {
-    result = await runInIris(findIrisDuplicates, [duplicateQuery(s)]);
+    result = await runInIris(findIrisDuplicates, [duplicateQuery(s), individualSchema]);
   } catch (e) {
     result = { ok: false, error: String(e && e.message || e) };
   }
-  if (result && result.ok) dupChecks.set(id, { state: 'done', matches: result.matches, confirmed });
+  if (result && result.ok) {
+    dupChecks.set(id, { state: 'done', matches: result.matches, confirmed });
+    if (result.schema && JSON.stringify(result.schema) !== JSON.stringify(individualSchema)) {
+      individualSchema = result.schema;
+      chrome.storage.local.set({ individualSchema });
+    }
+    // One record that is clearly this person: see whether they are registered too.
+    const ids = [...new Set(result.matches.filter(isStrongMatch).map((m) => m.id))];
+    if (ids.length === 1) lookUpRegistrations(id, ids[0]);
+  }
   else if (!result || result.error === 'no-form') dupChecks.delete(id);
   // The form has no name fields to search by: nothing to show, and no point asking again.
   else if (result.error === 'not-individual') dupChecks.set(id, { state: 'skip', confirmed });
@@ -896,9 +998,7 @@ const WHY_TEXT = { email: 'email', phone: 'phone', name: 'name', 'date of birth'
 function renderDuplicates() {
   const box = $('dup');
   const found = selectedId ? dupChecks.get(selectedId) : null;
-  // Only on an individual's form (or while the form is not known yet), where it matters.
-  const elsewhere = formInfo.kind === 'intervention' || formInfo.kind === 'other';
-  const check = found && found.state !== 'skip' && !elsewhere ? found : null;
+  const check = found && found.state !== 'skip' ? found : null;
   box.hidden = !check;
   if (!check) {
     box.replaceChildren();
@@ -912,11 +1012,13 @@ function renderDuplicates() {
   if (check.state === 'error') {
     box.className = 'dup info';
     box.textContent = `Could not look in IRIS for duplicates (${check.error}).`;
+    renderJourney();
     return;
   }
   if (!check.matches.length) {
     box.className = 'dup ok';
     box.textContent = '✓ Not in IRIS yet: no one with this email, phone or name.';
+    renderJourney();
     return;
   }
   const strong = check.matches.some(isStrongMatch);
@@ -938,13 +1040,14 @@ function renderDuplicates() {
     list.append(li);
   }
   box.replaceChildren(head, list);
+  renderJourney();
   if (!strong) return;
   const note = document.createElement('p');
   note.className = 'hint';
   if (check.confirmed) {
     note.textContent = 'You chose to fill the form anyway.';
   } else {
-    note.append(check.stopped ? 'Nothing was filled. Open the record above, or ' : 'Open the record above instead of making a new one, or ');
+    note.append(check.stopped ? 'Nothing was filled. Open the record above, or ' : 'Open the record above instead of making a new one. If it is someone else, ');
     const anyway = document.createElement('button');
     anyway.type = 'button';
     anyway.className = 'link';
@@ -952,7 +1055,7 @@ function renderDuplicates() {
     anyway.addEventListener('click', () => {
       check.confirmed = true;
       renderDuplicates();
-      fillIndividual();
+      $('fill').click();
     });
     note.append(anyway, '.');
   }
@@ -960,7 +1063,8 @@ function renderDuplicates() {
 }
 
 $('int-registration').addEventListener('click', () =>
-  fillFromPanel($('int-report'), (_s, at) => interventionFields('registration', at, new Date(), staffName), null, true, checkRegistration));
+  withBusy($('int-registration'), 'Filling…', () =>
+    fillFromPanel($('int-report'), (_s, at) => interventionFields('registration', at, new Date(), staffName), null, true, checkRegistration, 'registration')));
 
 // People for whom "fill anyway" was pressed after a registration was found in IRIS.
 const registrationConfirmed = new Set();
@@ -975,6 +1079,14 @@ async function checkRegistration(s, report) {
     found = await runInIris(findIrisRegistrations, [individualEntity || null]);
   } catch (e) {
     found = null;
+  }
+  if (found && found.ok) {
+    if (found.schema && JSON.stringify(found.schema) !== JSON.stringify(registrationSchema)) {
+      registrationSchema = found.schema;
+      chrome.storage.local.set({ registrationSchema });
+    }
+    registrationsFound.set(s.id, found.matches);
+    renderJourney();
   }
   if (!found || !found.ok || !found.matches.length) return true;
   const li = document.createElement('li');
@@ -1003,7 +1115,8 @@ async function checkRegistration(s, report) {
 }
 
 $('int-course').addEventListener('click', () =>
-  fillFromPanel($('int-report'), (_s, at) => interventionFields('course', at, new Date(), staffName), null, true));
+  withBusy($('int-course'), 'Filling…', () =>
+    fillFromPanel($('int-report'), (_s, at) => interventionFields('course', at, new Date(), staffName), null, true, null, 'course')));
 
 // The Auto Address box sits in its own frame, so look in all of them.
 async function typeAddress(tabId, query) {
@@ -1023,7 +1136,29 @@ async function typeAddress(tabId, query) {
 }
 
 // `emptyText` words an empty field better than "nothing in the CRM", by field key.
-function renderReport(list, result, emptyText = {}) {
+const STATUS_TEXT = {
+  filled: 'filled',
+  empty: 'nothing in the CRM',
+  'not-found': 'field not found on the form',
+  error: 'IRIS refused the value',
+  kept: 'already filled, left as is',
+  choose: 'more than one option, choose by hand',
+  'no-match': 'no such option in IRIS, choose by hand',
+  'other-year': 'filled with another year, check it',
+  cleared: 'IRIS cleared the value, fill it by hand',
+};
+
+// What to do once a step went through.
+const AFTER_TEXT = {
+  individual: 'Check the form and save it in IRIS. Then: Registration.',
+  registration: 'Check the form and save it in IRIS.',
+  course: 'Choose the course details on the form and save it in IRIS.',
+  outcome: 'Check the form and save it in IRIS.',
+};
+
+// A short report: one line with the counts, then only what needs a look.
+// The full list opens on request.
+function renderReport(list, result, emptyText = {}, step = '') {
   const item = (text, cls) => {
     const li = document.createElement('li');
     li.textContent = text;
@@ -1032,34 +1167,196 @@ function renderReport(list, result, emptyText = {}) {
   };
   if (!result || !result.ok) {
     const message = result && result.error === 'no-form'
-      ? 'Open the IRIS form first, then press the button again.'
+      ? 'Open IRIS in this tab first, then press the button again.'
       : `Could not fill: ${(result && result.error) || 'unknown error'}. Is the IRIS tab active?`;
     list.replaceChildren(item(message, 'error'));
     return;
   }
-  const text = {
-    filled: 'filled',
-    empty: 'nothing in the CRM',
-    'not-found': 'field not found on the form',
-    error: 'IRIS refused the value',
-    kept: 'already filled, left as is',
-    choose: 'more than one option, choose by hand',
-    'no-match': 'no such option in IRIS, choose by hand',
-    'other-year': 'filled with another year, check it',
-    cleared: 'IRIS cleared the value, fill it by hand',
-  };
-  const lines = result.results.map((r) => {
-    const said = (r.status === 'empty' && emptyText[r.key]) || text[r.status];
-    return item(`${FIELD_NAMES[r.key]}: ${said}${r.message ? ` (${r.message})` : ''}`, r.status);
-  });
-  if (result.address === 'picked') lines.push(item('Auto Address: the only suggestion was picked, check the address lines', 'filled'));
-  if (result.address === 'typed') lines.push(item('Auto Address: typed, pick the address from the IRIS list', 'filled'));
-  if (result.address === 'not-found') {
-    lines.push(item('Auto Address: box not found, type the Eircode there by hand', 'not-found'));
-    if (result.frames && result.frames.length) lines.push(item(`Frames on the page: ${result.frames.join(', ')}`, 'hint'));
+  const lines = result.results.map((r) => ({
+    status: r.status,
+    text: `${FIELD_NAMES[r.key]}: ${(r.status === 'empty' && emptyText[r.key]) || STATUS_TEXT[r.status]}${r.message ? ` (${r.message})` : ''}`,
+  }));
+  if (result.address === 'picked') lines.push({ status: 'filled', text: 'Auto Address: the only suggestion was picked, check the address lines' });
+  if (result.address === 'typed') lines.push({ status: 'choose', text: 'Auto Address: pick the address from the IRIS list' });
+  if (result.address === 'not-found') lines.push({ status: 'not-found', text: 'Auto Address: box not found, type the Eircode there by hand' });
+
+  const filled = lines.filter((l) => l.status === 'filled').length;
+  const issues = lines.filter((l) => l.status !== 'filled' && l.status !== 'kept');
+  const summary = document.createElement('li');
+  summary.className = issues.length ? 'summary has-issues' : 'summary';
+  const ok = document.createElement('span');
+  ok.className = 'ok';
+  ok.textContent = `✓ ${filled} filled`;
+  summary.append(ok);
+  if (issues.length) {
+    const warn = document.createElement('span');
+    warn.className = 'warn';
+    warn.textContent = `⚠ ${issues.length} to check`;
+    summary.append(warn);
   }
-  lines.push(item('Check the form, finish the rest and save in IRIS.', ''));
-  list.replaceChildren(...lines);
+  const out = [summary, ...issues.map((l) => item(l.text, 'issue'))];
+
+  const details = document.createElement('details');
+  const label = document.createElement('summary');
+  label.textContent = 'All fields';
+  const all = document.createElement('ul');
+  all.append(...lines.map((l) => item(l.text, l.status)));
+  if (result.address === 'not-found' && result.frames && result.frames.length) all.append(item(`Frames on the page: ${result.frames.join(', ')}`, 'hint'));
+  details.append(label, all);
+  const more = document.createElement('li');
+  more.append(details);
+  out.push(more, item(AFTER_TEXT[step] || 'Check the form, finish the rest and save in IRIS.', 'next-hint'));
+  list.replaceChildren(...out);
 }
+
+/** "Anna Kowalska" → "AK". */
+function initials(s) {
+  const letters = [s.first_name, s.last_name].map((n) => String(n || '').trim().charAt(0)).join('');
+  return letters.toUpperCase() || '?';
+}
+
+// ---------- The steps strip and the sections ----------
+
+const STEP_BUTTON = { individual: 'fill', registration: 'int-registration', course: 'int-course', outcome: 'int-outcome' };
+const STEP_SECTION = { individual: 'sec-individual', registration: 'sec-interventions', course: 'sec-interventions', outcome: 'sec-outcome' };
+
+// What the panel knows of the selected person's way through IRIS.
+function journey(s) {
+  const done = progress.get(s.id) || new Set();
+  const check = dupChecks.get(s.id);
+  const inIris = Boolean(check && check.state === 'done' && check.matches.some(isStrongMatch));
+  const regs = registrationsFound.get(s.id);
+  const outcome = outcomes.get(s.id);
+  const working = Boolean(outcome && outcome.is_working);
+  const steps = [
+    { key: 'individual', label: 'Individual', done: inIris || done.has('individual') },
+    { key: 'registration', label: 'Registration', done: Boolean(regs && regs.length) || done.has('registration') },
+    { key: 'course', label: 'Course', done: done.has('course') },
+    { key: 'outcome', label: 'Job outcome', done: working && isFilled(s.id), na: !working },
+  ];
+  const next = steps.find((x) => !x.done && !x.na);
+  return { steps, next: next ? next.key : '', inIris, check, regs, outcome, working };
+}
+
+// Which sections stand open: the one for the IRIS form in the tab, else the next step's.
+function autoSections(next) {
+  if (formInfo.kind === 'individual' && formInfo.isNew) return new Set(['sec-individual']);
+  if (formInfo.kind === 'intervention') return new Set([next === 'outcome' ? 'sec-outcome' : 'sec-interventions']);
+  return new Set([STEP_SECTION[next] || 'sec-individual']);
+}
+
+function renderJourney() {
+  const s = students.find((x) => x.id === selectedId);
+  if (!s) return;
+  const j = journey(s);
+  const open = manualSections || autoSections(j.next);
+
+  $('steps').replaceChildren(...j.steps.map((step, i) => {
+    const li = document.createElement('li');
+    li.className = [step.done ? 'done' : '', step.key === j.next ? 'next' : '', step.na ? 'na' : '', open.has(STEP_SECTION[step.key]) ? 'open' : ''].filter(Boolean).join(' ');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.title = step.na ? `${step.label}: not working, nothing to enter` : `${step.label}${step.done ? ': done' : ''}`;
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.textContent = step.done ? '✓' : step.na ? '–' : String(i + 1);
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = step.label;
+    button.append(dot, label);
+    button.addEventListener('click', () => {
+      manualSections = new Set([STEP_SECTION[step.key]]);
+      renderJourney();
+      $(STEP_SECTION[step.key]).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+    li.append(button);
+    return li;
+  }));
+
+  for (const id of ['sec-individual', 'sec-interventions', 'sec-outcome']) {
+    $(id).querySelector('.block-head').setAttribute('aria-expanded', String(open.has(id)));
+  }
+
+  // The state of each section, on its header.
+  const state = (id, text, cls = '') => {
+    const el = $(id).querySelector('.state');
+    el.textContent = text;
+    el.className = `state ${cls}`.trim();
+  };
+  const done = progress.get(s.id) || new Set();
+  state('sec-individual',
+    j.inIris ? 'In IRIS ✓' : done.has('individual') ? 'Filled ✓' : j.check && j.check.state === 'checking' ? 'Looking in IRIS…'
+      : j.check && j.check.state === 'done' ? 'Not in IRIS yet' : '',
+    j.inIris || done.has('individual') ? 'ok' : '');
+  const interventionsText = [
+    (j.regs && j.regs.length) || done.has('registration') ? 'Registration ✓' : '',
+    done.has('course') ? 'Course ✓' : '',
+  ].filter(Boolean).join(' · ');
+  state('sec-interventions', interventionsText, interventionsText ? 'ok' : '');
+  state('sec-outcome',
+    !outcomes.has(s.id) ? '' : j.outcome === undefined ? 'Could not load' : !j.outcome ? 'No answer yet'
+      : !j.working ? 'Not working' : isFilled(s.id) ? 'Filled ✓' : 'To fill',
+    j.working ? (isFilled(s.id) ? 'ok' : 'warn') : '');
+
+  // One big button: the next step's.
+  for (const [key, id] of Object.entries(STEP_BUTTON)) $(id).classList.toggle('primary', key === j.next);
+}
+
+// Sections open and close by hand too; the choice stands until another person or form.
+for (const id of ['sec-individual', 'sec-interventions', 'sec-outcome']) {
+  $(id).querySelector('.block-head').addEventListener('click', () => {
+    const s = students.find((x) => x.id === selectedId);
+    if (!s) return;
+    const open = new Set(manualSections || autoSections(journey(s).next));
+    if (open.has(id)) open.delete(id);
+    else open.add(id);
+    manualSections = open;
+    renderJourney();
+  });
+}
+
+// Registrations of a person already in IRIS, looked up with the field names learnt
+// on an intervention form. Unknown until such a form was used once.
+async function lookUpRegistrations(studentId, individualRecordId) {
+  if (!registrationSchema || !individualEntity) return;
+  let found;
+  try {
+    found = await runInIris(findIrisRegistrations, [individualEntity, registrationSchema, individualRecordId]);
+  } catch (e) {
+    return;
+  }
+  if (!found || !found.ok) return;
+  registrationsFound.set(studentId, found.matches);
+  if (studentId === selectedId) renderJourney();
+}
+
+// ---------- Keyboard ----------
+
+// In the search box: arrows move through the people, Enter picks one.
+$('search').addEventListener('keydown', (e) => {
+  if (!students.length) return;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    focusIndex = Math.max(0, Math.min(students.length - 1, (focusIndex < 0 && step < 0 ? 0 : focusIndex + step)));
+    renderResults();
+    const li = $('results').children[focusIndex];
+    if (li) li.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    const s = students[focusIndex >= 0 ? focusIndex : 0];
+    if (s) select(s.id);
+  }
+});
+
+// Ctrl+Enter anywhere: run the highlighted step.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || !(e.ctrlKey || e.metaKey) || $('main').hidden || !selectedId) return;
+  const button = document.querySelector('#selected button.primary');
+  if (button && !button.disabled) {
+    e.preventDefault();
+    button.click();
+  }
+});
 
 start();
