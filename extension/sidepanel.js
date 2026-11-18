@@ -80,7 +80,7 @@ let workingOnly = false;
 // The LDC Staff Member to put on interventions; '' is the signed-in IRIS user.
 let staffName = '';
 // The kind of IRIS form open in the active tab: { kind: 'individual' | 'intervention' | 'other' | 'none', isNew }.
-let formInfo = { kind: 'none' };
+let formInfo = { kind: '' };
 // The table IRIS keeps interventions in, learnt from an intervention form or looked up once.
 let interventionEntity = '';
 // The table IRIS keeps individuals in, learnt from an individual's form.
@@ -99,6 +99,7 @@ let manualSections = null;
 // The search result highlighted with the arrow keys.
 let focusIndex = -1;
 let searchSeq = 0;
+let lastSearch = '';
 let searchTimer = null;
 
 function show(section) {
@@ -165,7 +166,7 @@ function enterMain() {
   show('main');
   $('search').focus();
   runSearch();
-  refreshFormInfo();
+  refreshFormInfo(true);
   // Live updates: any change to students in the CRM refreshes the list.
   channel = client
     .channel('iris-students')
@@ -184,6 +185,7 @@ function leaveMain() {
   channel = null;
   outcomeChannel = null;
   students = [];
+  lastSearch = '';
   selectedId = null;
   draft = null;
   outcomes.clear();
@@ -259,6 +261,10 @@ async function runSearch() {
     $('search-state').textContent = `CRM error: ${found.error.message}`;
     return;
   }
+  // The CRM changes all the time (live updates): repaint only when the list did.
+  const signature = JSON.stringify([found.students, found.note, workingOnly]);
+  if (signature === lastSearch) return;
+  lastSearch = signature;
   students = found.students;
   // Arrow keys start from the picked person, else from the first match of a search.
   focusIndex = students.findIndex((x) => x.id === selectedId);
@@ -602,8 +608,15 @@ $('out-date').addEventListener('change', (e) => {
   renderOutcome();
 });
 
-async function runInIris(func, args) {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+// Fills always go to the active tab. Look-ups (`anyTab`) may use any IRIS tab,
+// so "in IRIS or not" shows while you are on the CRM or anywhere else.
+async function runInIris(func, args, { anyTab = false } = {}) {
+  let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (anyTab && !isIrisUrl(tab && tab.url)) {
+    const iris = (await chrome.tabs.query({ url: 'https://*.dynamics.com/*' }))
+      .sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+    if (iris.length) tab = iris[0];
+  }
   if (!tab) return { ok: false, error: 'no-form' };
   const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', func, args });
   return result;
@@ -774,6 +787,14 @@ async function withBusy(button, text, run) {
   }
 }
 
+function isIrisUrl(url) {
+  try {
+    return new URL(url).hostname.endsWith('.dynamics.com');
+  } catch (e) {
+    return false;
+  }
+}
+
 function markDone(id, step) {
   const steps = progress.get(id) || new Set();
   steps.add(step);
@@ -910,13 +931,21 @@ function fillIndividual() {
 }
 
 // Which IRIS form is open. The buttons for another kind of form turn into outlines.
-async function refreshFormInfo() {
+let pendingInfo = null;
+
+// `settle`: take what is seen at once (after the panel itself opened a form or the tab changed).
+async function refreshFormInfo(settle = false) {
   let info = { kind: 'none' };
   try {
     const result = await runInIris(irisFormInfo, []);
     if (result && result.kind) info = result;
   } catch (e) {
     // Not an IRIS tab, or a page the extension may not touch.
+  }
+  if (info.kind === 'none') {
+    // Look-ups still work while IRIS sits in another tab.
+    const others = await chrome.tabs.query({ url: 'https://*.dynamics.com/*' });
+    if (others.length) info = { kind: 'elsewhere' };
   }
   if (info.kind === 'intervention' && info.entity && info.entity !== interventionEntity) {
     interventionEntity = info.entity;
@@ -926,7 +955,15 @@ async function refreshFormInfo() {
     individualEntity = info.entity;
     chrome.storage.local.set({ individualEntity });
   }
-  const changed = info.kind !== formInfo.kind || info.isNew !== formInfo.isNew;
+  // IRIS reloads parts of itself now and then; a form that seems to vanish for one
+  // look must not flip the panel back and forth. A change counts when seen twice.
+  let changed = info.kind !== formInfo.kind || info.isNew !== formInfo.isNew;
+  if (changed && !settle) {
+    const same = pendingInfo && pendingInfo.kind === info.kind && pendingInfo.isNew === info.isNew;
+    pendingInfo = info;
+    if (!same) return;
+  }
+  pendingInfo = null;
   formInfo = info;
   if (changed) renderFormInfo();
   // The first IRIS page seen after a pick (or one that can search now): look for the person.
@@ -950,7 +987,8 @@ function renderFormInfo() {
     el.textContent = {
       other: 'IRIS: another form is open',
       page: 'IRIS is open, no form',
-    }[formInfo.kind] || 'IRIS is not open in this tab';
+      elsewhere: 'IRIS is open in another tab',
+    }[formInfo.kind] || 'IRIS is not open';
   }
   renderJourney();
   renderDuplicates();
@@ -959,8 +997,8 @@ function renderFormInfo() {
 setInterval(() => {
   if (document.visibilityState === 'visible' && !$('main').hidden) refreshFormInfo();
 }, 2000);
-chrome.tabs.onActivated.addListener(() => { if (!$('main').hidden) refreshFormInfo(); });
-chrome.tabs.onUpdated.addListener((_tabId, change) => { if (change.status === 'complete' && !$('main').hidden) refreshFormInfo(); });
+chrome.tabs.onActivated.addListener(() => { if (!$('main').hidden) refreshFormInfo(true); });
+chrome.tabs.onUpdated.addListener((_tabId, change) => { if (change.status === 'complete' && !$('main').hidden) refreshFormInfo(true); });
 
 // Looks in IRIS for the selected person. Needs an individual's form open in the tab;
 // without one the check is simply not shown.
@@ -972,7 +1010,7 @@ async function checkDuplicates(id) {
   if (id === selectedId) renderDuplicates();
   let result;
   try {
-    result = await runInIris(findIrisDuplicates, [duplicateQuery(s), individualSchema]);
+    result = await runInIris(findIrisDuplicates, [duplicateQuery(s), individualSchema], { anyTab: true });
   } catch (e) {
     result = { ok: false, error: String(e && e.message || e) };
   }
@@ -995,10 +1033,15 @@ async function checkDuplicates(id) {
 
 const WHY_TEXT = { email: 'email', phone: 'phone', name: 'name', 'date of birth': 'date of birth' };
 
+let lastDuplicates = '';
+
 function renderDuplicates() {
   const box = $('dup');
   const found = selectedId ? dupChecks.get(selectedId) : null;
   const check = found && found.state !== 'skip' ? found : null;
+  const signature = JSON.stringify([selectedId, check]);
+  if (signature === lastDuplicates) return;
+  lastDuplicates = signature;
   box.hidden = !check;
   if (!check) {
     box.replaceChildren();
@@ -1217,6 +1260,8 @@ function initials(s) {
 
 // ---------- The steps strip and the sections ----------
 
+let lastJourney = '';
+
 const STEP_BUTTON = { individual: 'fill', registration: 'int-registration', course: 'int-course', outcome: 'int-outcome' };
 const STEP_SECTION = { individual: 'sec-individual', registration: 'sec-interventions', course: 'sec-interventions', outcome: 'sec-outcome' };
 
@@ -1250,6 +1295,11 @@ function renderJourney() {
   if (!s) return;
   const j = journey(s);
   const open = manualSections || autoSections(j.next);
+  // Nothing changed since the last paint: leave the page alone, so nothing twitches.
+  const signature = JSON.stringify([s.id, j.steps, j.next, [...open], [...(progress.get(s.id) || [])],
+    j.check && j.check.state, j.regs && j.regs.length, j.outcome, isFilled(s.id), outcomes.has(s.id)]);
+  if (signature === lastJourney) return;
+  lastJourney = signature;
 
   $('steps').replaceChildren(...j.steps.map((step, i) => {
     const li = document.createElement('li');
@@ -1321,7 +1371,7 @@ async function lookUpRegistrations(studentId, individualRecordId) {
   if (!registrationSchema || !individualEntity) return;
   let found;
   try {
-    found = await runInIris(findIrisRegistrations, [individualEntity, registrationSchema, individualRecordId]);
+    found = await runInIris(findIrisRegistrations, [individualEntity, registrationSchema, individualRecordId], { anyTab: true });
   } catch (e) {
     return;
   }
